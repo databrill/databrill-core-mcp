@@ -1,0 +1,14 @@
+{
+	"nodeModulesDir": "auto",
+	"fmt": {
+		"useTabs": true,
+		"lineWidth": 120,
+		"indentWidth": 4,
+		"semiColons": true,
+		"singleQuote": false,
+		"proseWrap": "preserve"
+	},
+	"lint": {
+		"rules": { "tags": ["recommended"] }
+	}
+}

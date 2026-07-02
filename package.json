@@ -1,0 +1,33 @@
+{
+	"name": "@databrill/core-mcp",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Databrill client-DB metric loaders + question tools, exposed as MCP tools and a CLI. Runs under bun and deno.",
+	"exports": {
+		".": "./src/registerTools.ts",
+		"./contract": "./src/contract.ts"
+	},
+	"bin": {
+		"core-mcp-stdio": "./bin/stdio.ts",
+		"core-mcp": "./bin/cli.ts"
+	},
+	"scripts": {
+		"mcp": "bun run bin/stdio.ts",
+		"cli": "bun run bin/cli.ts",
+		"parity": "bun run test/parity_salesDropDiagnosis.ts"
+	},
+	"dependencies": {
+		"@effect/cli": "^0.75.0",
+		"@effect/platform": "^0.96.0",
+		"@effect/platform-node": "^0.106.0",
+		"@modelcontextprotocol/sdk": "^1.0.0",
+		"dotenv": "^16.4.5",
+		"effect": "3.21.4",
+		"luxon": "^3.5.0",
+		"postgres": "^3.4.8",
+		"tinyduration": "^3.3.1"
+	},
+	"devDependencies": {
+		"@types/luxon": "^3.4.2"
+	}
+}
