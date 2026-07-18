@@ -11,7 +11,11 @@
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { type CallToolRequest, CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+	type CallToolRequest,
+	CallToolRequestSchema,
+	ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { Sql } from "postgres";
 import { type Config, summarizeConfig } from "./config.ts";
 import { tools } from "./contract.ts";

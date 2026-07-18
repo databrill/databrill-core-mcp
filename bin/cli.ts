@@ -48,12 +48,16 @@ const loadAdsCommand = Command.make(
 	{
 		wsid: wsidOption,
 		stores: Options.text("stores").pipe(
-			Options.withDescription("country code (US), region (na,eu,fe), marketplaceId, '*', or {merchantId}-{scope}"),
+			Options.withDescription(
+				"country code (US), region (na,eu,fe), marketplaceId, '*', or {merchantId}-{scope}",
+			),
 		),
 		when: Options.text("when").pipe(
 			Options.withDescription("ISO 8601 interval/duration: 2026-03-30/2026-04-05, P7D, P4W/2026-04-13"),
 		),
-		groupBy: Options.text("groupBy").pipe(Options.withDescription("Comma-separated dimensions (asin, family, adType, …)")),
+		groupBy: Options.text("groupBy").pipe(
+			Options.withDescription("Comma-separated dimensions (asin, family, adType, …)"),
+		),
 		timeUnit: Options.text("timeUnit").pipe(Options.optional),
 		products: Options.text("products").pipe(Options.optional),
 		filter: Options.text("filter").pipe(Options.optional),
@@ -82,7 +86,9 @@ const loadAdsCommand = Command.make(
 				yield* Effect.promise(() => provider.endAll());
 			}
 		}),
-).pipe(Command.withDescription("Fetch Amazon advertising metrics aggregated by dimensions (the dbl-metrics-ads loader)"));
+).pipe(
+	Command.withDescription("Fetch Amazon advertising metrics aggregated by dimensions (the dbl-metrics-ads loader)"),
+);
 
 const salesDropDiagnosis = Command.make(
 	"salesDropDiagnosis",
@@ -131,10 +137,15 @@ const loadTrafficCommand = Command.make(
 	"loadTraffic",
 	{
 		wsid: wsidOption,
-		stores: Options.text("stores").pipe(Options.withDescription("country code, region, marketplaceId, '*', or {merchantId}-{scope}")),
+		stores: Options.text("stores").pipe(
+			Options.withDescription("country code, region, marketplaceId, '*', or {merchantId}-{scope}"),
+		),
 		when: Options.text("when").pipe(Options.withDescription("ISO interval/duration: P7D, 2026-03-30/2026-04-05")),
 		groupBy: Options.text("groupBy").pipe(Options.withDescription("asin (default) | family"), Options.optional),
-		timeUnit: Options.text("timeUnit").pipe(Options.withDescription("WEEK (default) | DAY | MONTH"), Options.optional),
+		timeUnit: Options.text("timeUnit").pipe(
+			Options.withDescription("WEEK (default) | DAY | MONTH"),
+			Options.optional,
+		),
 		products: Options.text("products").pipe(Options.optional),
 	},
 	(o) =>
@@ -161,7 +172,9 @@ const loadSqpCommand = Command.make(
 	"loadSqp",
 	{
 		wsid: wsidOption,
-		stores: Options.text("stores").pipe(Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}")),
+		stores: Options.text("stores").pipe(
+			Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+		),
 		when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
 		products: Options.text("products").pipe(Options.optional),
 		timeUnit: Options.text("timeUnit").pipe(Options.withDescription("WEEK (default) | MONTH"), Options.optional),
@@ -191,7 +204,9 @@ const loadRankCommand = Command.make(
 	"loadRank",
 	{
 		wsid: wsidOption,
-		stores: Options.text("stores").pipe(Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}")),
+		stores: Options.text("stores").pipe(
+			Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+		),
 		when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
 		products: Options.text("products").pipe(Options.optional),
 	},
@@ -213,10 +228,15 @@ const loadEconomicsCommand = Command.make(
 	"loadEconomics",
 	{
 		wsid: wsidOption,
-		stores: Options.text("stores").pipe(Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}")),
+		stores: Options.text("stores").pipe(
+			Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+		),
 		when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
 		products: Options.text("products").pipe(Options.optional),
-		economics: Options.text("economics").pipe(Options.withDescription("JSON cost inputs {perAsin:{asin:{price,cogs,...}}}"), Options.optional),
+		economics: Options.text("economics").pipe(
+			Options.withDescription("JSON cost inputs {perAsin:{asin:{price,cogs,...}}}"),
+			Options.optional,
+		),
 	},
 	(o) =>
 		Effect.gen(function* () {
@@ -242,7 +262,9 @@ const inventoryPacingCommand = Command.make(
 	"inventoryPacing",
 	{
 		wsid: wsidOption,
-		stores: Options.text("stores").pipe(Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}")),
+		stores: Options.text("stores").pipe(
+			Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+		),
 		velocityDays: Options.integer("velocity-days").pipe(Options.optional),
 		spendWindowDays: Options.integer("spend-window-days").pipe(Options.optional),
 		criticalDays: Options.integer("critical-days").pipe(Options.optional),

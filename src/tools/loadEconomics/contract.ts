@@ -11,7 +11,8 @@ const inputSchema = {
 	properties: {
 		stores: {
 			type: "string",
-			description: "Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
+			description:
+				"Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
 		},
 		when: { type: "string", description: "ISO 8601 interval or duration. Required." },
 		products: {
@@ -34,9 +35,7 @@ function parseParams(args: Record<string, unknown>): LoadEconomicsParams {
 		stores: String(args.stores ?? ""),
 		when: String(args.when ?? ""),
 		products: typeof args.products === "string" ? args.products : undefined,
-		economics: (args.economics && typeof args.economics === "object")
-			? args.economics as EconomicsInput
-			: null,
+		economics: (args.economics && typeof args.economics === "object") ? args.economics as EconomicsInput : null,
 	};
 }
 

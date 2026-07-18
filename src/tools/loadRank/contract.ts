@@ -12,7 +12,8 @@ const inputSchema = {
 	properties: {
 		stores: {
 			type: "string",
-			description: "Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
+			description:
+				"Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
 		},
 		when: { type: "string", description: "ISO 8601 interval or duration. Required." },
 		products: {

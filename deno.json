@@ -1,14 +1,28 @@
 {
 	"nodeModulesDir": "auto",
+	"tasks": {
+		"fmt": "deno fmt",
+		"fmt:check": "deno fmt --check",
+		"lint": "deno lint",
+		"check": "deno check",
+		"static": "deno --quiet fmt && deno task check && deno task lint"
+	},
 	"fmt": {
 		"useTabs": true,
 		"lineWidth": 120,
 		"indentWidth": 4,
 		"semiColons": true,
 		"singleQuote": false,
-		"proseWrap": "preserve"
+		"proseWrap": "preserve",
+		"exclude": [
+			"**/*.md"
+		]
 	},
 	"lint": {
-		"rules": { "tags": ["recommended"] }
+		"rules": {
+			"tags": [
+				"recommended"
+			]
+		}
 	}
 }

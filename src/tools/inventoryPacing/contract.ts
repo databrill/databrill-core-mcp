@@ -13,7 +13,8 @@ const inputSchema = {
 	properties: {
 		stores: {
 			type: "string",
-			description: "Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
+			description:
+				"Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
 		},
 		velocityDays: { type: "integer", description: "Window for units/day. Default 7." },
 		spendWindowDays: { type: "integer", description: "Window for ad spend/day. Default 7." },

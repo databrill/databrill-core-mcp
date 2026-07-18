@@ -16,19 +16,6 @@ import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import type { ResolvedStore } from "../loadAds/loadAds.ts";
 import type { LowInventoryRow } from "./types.ts";
 
-/** Competition ranking (1 = highest value, ties share rank). */
-function competitionRank(values: number[]): number[] {
-	const indexed = values.map((v, i) => ({ v, i }));
-	indexed.sort((a, b) => b.v - a.v);
-	const ranks = new Array<number>(values.length);
-	let rank = 1;
-	for (let k = 0; k < indexed.length; k++) {
-		if (k > 0 && indexed[k]!.v < indexed[k - 1]!.v) rank = k + 1;
-		ranks[indexed[k]!.i] = rank;
-	}
-	return ranks;
-}
-
 export async function loadLowInventory(
 	sql: postgres.Sql,
 	stores: ResolvedStore[],
@@ -72,7 +59,11 @@ export async function loadLowInventory(
 				GROUP BY "childAsin"
 			`;
 			for (const r of stRows) {
-				unitsByAsin.set(r.asin, { units1d: 0, units7d: Number(r.units7d) || 0, units28d: Number(r.units28d) || 0 });
+				unitsByAsin.set(r.asin, {
+					units1d: 0,
+					units7d: Number(r.units7d) || 0,
+					units28d: Number(r.units28d) || 0,
+				});
 			}
 		}
 

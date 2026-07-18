@@ -306,9 +306,10 @@ function attachInventory(diagnoses: StoreDiagnosis[], rows: LowInventoryRow[], r
 				key: "inventory",
 				label: "Inventory runway",
 				severity: (worst.runway ?? 99) <= 7 ? "high" : "medium",
-				evidence: `${flags.length} ASIN(s) under ${runwayMax}d runway; lowest ${worst.label} (${worst.asin}) at ${
-					worst.runway ?? "n/a"
-				}d — low stock can suppress both traffic and conversion`,
+				evidence:
+					`${flags.length} ASIN(s) under ${runwayMax}d runway; lowest ${worst.label} (${worst.asin}) at ${
+						worst.runway ?? "n/a"
+					}d — low stock can suppress both traffic and conversion`,
 			});
 		}
 	}

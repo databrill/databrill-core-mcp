@@ -14,7 +14,7 @@
 
 import postgres from "postgres";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
-import { type DateRange, resolveProducts, type ResolvedStore, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
+import { type DateRange, type ResolvedStore, resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import {
 	type LoadTrafficParams,
 	type LoadTrafficResult,
@@ -114,9 +114,9 @@ export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql):
 	}
 
 	const groupByCols = [`r."marketplaceId"`, bucket.groupBy, groupCol];
-	const query = `SELECT\n  ${selectCols.join(",\n  ")}\n${from}\nWHERE ${
-		wheres.join("\n  AND ")
-	}\nGROUP BY ${groupByCols.join(", ")}\nORDER BY ${bucket.groupBy}, ${groupCol}`;
+	const query = `SELECT\n  ${selectCols.join(",\n  ")}\n${from}\nWHERE ${wheres.join("\n  AND ")}\nGROUP BY ${
+		groupByCols.join(", ")
+	}\nORDER BY ${bucket.groupBy}, ${groupCol}`;
 
 	const rows = await sql.unsafe(query) as Array<Record<string, unknown>>;
 

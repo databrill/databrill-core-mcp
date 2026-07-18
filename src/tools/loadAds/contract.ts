@@ -18,13 +18,13 @@ const inputSchema = {
 		},
 		when: {
 			type: "string",
-			description:
-				"ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Required.",
+			description: "ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Required.",
 		},
 		groupBy: {
 			type: "string",
-			description:
-				`Comma-separated dimensions: ${VALID_GROUP_BY.join(", ")}. Required. Use 'store' for no specific breakdown.`,
+			description: `Comma-separated dimensions: ${
+				VALID_GROUP_BY.join(", ")
+			}. Required. Use 'store' for no specific breakdown.`,
 		},
 		timeUnit: {
 			type: "string",

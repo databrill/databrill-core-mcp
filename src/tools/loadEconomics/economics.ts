@@ -80,11 +80,7 @@ export function computeEconomics(
 
 	return advertisedAsins.map((a) => {
 		const e = economics.perAsin[a.asin] ?? economics.familyDefault ?? null;
-		const source: PerAsinEconomics["source"] = economics.perAsin[a.asin]
-			? "sheet"
-			: e
-			? "default"
-			: "missing";
+		const source: PerAsinEconomics["source"] = economics.perAsin[a.asin] ? "sheet" : e ? "default" : "missing";
 		const price = e?.price ?? 0;
 		const cogs = e?.cogs ?? 0;
 		const fbaPickPack = e?.fbaPickPack ?? 0;

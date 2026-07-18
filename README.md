@@ -57,14 +57,14 @@ in `.env` and the config is safe to commit.
 
 ```jsonc
 {
-  "version": 1,
-  "workspaces": {
-    "100000001": {
-      "label": "Example Workspace A",
-      "database": { "postgresUrl": "${WORKSPACE_A_POSTGRES_URL}", "schema": "w100000001" },
-      "merchants": { "AEXAMPLE0000001": { "name": "Example Seller A", "countries": ["US", "CA"] } }
-    }
-  }
+	"version": 1,
+	"workspaces": {
+		"100000001": {
+			"label": "Example Workspace A",
+			"database": { "postgresUrl": "${WORKSPACE_A_POSTGRES_URL}", "schema": "w100000001" },
+			"merchants": { "AEXAMPLE0000001": { "name": "Example Seller A", "countries": ["US", "CA"] } }
+		}
+	}
 }
 ```
 

@@ -8,7 +8,12 @@
 
 import postgres from "postgres";
 import { loadAds } from "../loadAds/loadAds.ts";
-import { type AdvertisedAsinRollup, computeEconomics, type EconomicsInput, type PerSaleEconomics } from "./economics.ts";
+import {
+	type AdvertisedAsinRollup,
+	computeEconomics,
+	type EconomicsInput,
+	type PerSaleEconomics,
+} from "./economics.ts";
 
 function fail(msg: string): never {
 	throw new Error(msg);

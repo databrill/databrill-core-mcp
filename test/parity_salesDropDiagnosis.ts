@@ -62,13 +62,25 @@ function derivePostgresUrl(): string {
 	const searchPath = kv.options?.match(/search_path=([^\s]+)/)?.[1];
 	if (searchPath) params.push(`options=${encodeURIComponent(`-c search_path=${searchPath}`)}`);
 	const query = params.length ? `?${params.join("&")}` : "";
-	return `postgresql://${encodeURIComponent(kv.user)}:${encodeURIComponent(password)}@${kv.host}:${kv.port}/${kv.dbname}${query}`;
+	return `postgresql://${encodeURIComponent(kv.user)}:${
+		encodeURIComponent(password)
+	}@${kv.host}:${kv.port}/${kv.dbname}${query}`;
 }
 
 function runReference(): StoreDiagnosis[] {
 	const stdout = execFileSync(
 		"deno",
-		["task", "reports", "salesDropDiagnosis", "--client", CLIENT, "--all-stores", "--skip-inventory", "--format", "json"],
+		[
+			"task",
+			"reports",
+			"salesDropDiagnosis",
+			"--client",
+			CLIENT,
+			"--all-stores",
+			"--skip-inventory",
+			"--format",
+			"json",
+		],
 		{ cwd: AGENCY_REPO, encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
 	);
 	return JSON.parse(stdout) as StoreDiagnosis[];
@@ -147,7 +159,9 @@ async function main() {
 		if (!portMap.has(k)) continue;
 		const r = refMap.get(k)!, p = portMap.get(k)!;
 		if (r.site !== p.site || r.store !== p.store) {
-			labelNotes.push(`${k}: ref site/label ${r.site}/${r.store} vs port ${p.site}/${p.store} (GB/UK convention)`);
+			labelNotes.push(
+				`${k}: ref site/label ${r.site}/${r.store} vs port ${p.site}/${p.store} (GB/UK convention)`,
+			);
 		}
 		// Exclude the cosmetic identity labels; compare all math + structure.
 		const strip = (d: StoreDiagnosis) => ({ ...d, site: undefined, store: undefined });
@@ -168,7 +182,9 @@ async function main() {
 		console.log(`\n✖ ${diffs.length} field mismatch(es) on matched stores (first 25):`);
 		for (const d of diffs.slice(0, 25)) console.log(`    ${d}`);
 	}
-	fail(`parity failed — ${diffs.length} field diffs, ${onlyRef.length} ref-only, ${onlyPort.length} port-only stores`);
+	fail(
+		`parity failed — ${diffs.length} field diffs, ${onlyRef.length} ref-only, ${onlyPort.length} port-only stores`,
+	);
 }
 
 main().catch((e) => fail(e instanceof Error ? e.stack ?? e.message : String(e)));

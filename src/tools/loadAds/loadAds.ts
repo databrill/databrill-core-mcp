@@ -7,10 +7,7 @@ import {
 	marketplaceInfos,
 	regionCountryCodes,
 } from "../../amazonConstants.ts";
-import {
-	parseWhenAst,
-	type WhenAst_Duration,
-} from "../../parseWhenAst.ts";
+import { parseWhenAst, type WhenAst_Duration } from "../../parseWhenAst.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,8 +34,18 @@ export interface FilterExpr {
 }
 
 export const VALID_GROUP_BY = [
-	"asin", "family", "parentAsin", "campaign", "adType",
-	"placement", "target", "adgroup", "country", "store", "merchant", "marketplaceId",
+	"asin",
+	"family",
+	"parentAsin",
+	"campaign",
+	"adType",
+	"placement",
+	"target",
+	"adgroup",
+	"country",
+	"store",
+	"merchant",
+	"marketplaceId",
 ] as const;
 export type GroupByDim = typeof VALID_GROUP_BY[number];
 
@@ -200,11 +207,15 @@ export async function resolveStores(spec: string, sql: postgres.Sql): Promise<Re
 			const merchantId = token.slice(0, dashIdx);
 			const scope = token.slice(dashIdx + 1);
 			if (!knownMerchantIds.has(merchantId)) {
-				fail(`Unknown merchant '${merchantId}' in store token '${token}'. Known merchants come from amazon_store.`);
+				fail(
+					`Unknown merchant '${merchantId}' in store token '${token}'. Known merchants come from amazon_store.`,
+				);
 			}
 			const infos = resolveScope(scope);
 			if (infos.length === 0) {
-				fail(`Unknown store scope '${scope}' in token '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, or *.`);
+				fail(
+					`Unknown store scope '${scope}' in token '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, or *.`,
+				);
 			}
 			const merchantName = merchantNameById.get(merchantId)!;
 			for (const info of infos) {
@@ -217,7 +228,9 @@ export async function resolveStores(spec: string, sql: postgres.Sql): Promise<Re
 			// Bare scope -> every merchant selling in the resolved marketplace(s)
 			const infos = resolveScope(token);
 			if (infos.length === 0) {
-				fail(`Unknown store '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, '*', or '{merchantId}-{scope}'.`);
+				fail(
+					`Unknown store '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, '*', or '{merchantId}-{scope}'.`,
+				);
 			}
 			for (const info of infos) {
 				const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
@@ -580,7 +593,11 @@ function buildDimSql(
 			case "merchant": {
 				// Seller account: merchantId + its amazon_store name
 				const whenClauses = distinctMerchants(stores)
-					.map((s) => `WHEN ${tableAlias}."merchantId" = '${s.merchantId}' THEN '${s.merchantName.replace(/'/g, "''")}'`)
+					.map((s) =>
+						`WHEN ${tableAlias}."merchantId" = '${s.merchantId}' THEN '${
+							s.merchantName.replace(/'/g, "''")
+						}'`
+					)
 					.join(" ");
 				selectExprs.push(`${tableAlias}."merchantId" AS "merchantId"`);
 				selectExprs.push(`CASE ${whenClauses} END AS "merchantName"`);
@@ -596,7 +613,15 @@ function buildDimSql(
 		}
 	}
 
-	return { selectExprs, groupByExprs, outputCols, needsCampaignJoin, needsAdJoin, needsFamilyJoin, needsParentAsinJoin };
+	return {
+		selectExprs,
+		groupByExprs,
+		outputCols,
+		needsCampaignJoin,
+		needsAdJoin,
+		needsFamilyJoin,
+		needsParentAsinJoin,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -667,19 +692,23 @@ function buildQuery1(
 
 	// FROM + JOINs
 	let fromClause = `FROM "amzadapi_reports_v1__search_asin_placement__byDay" r`;
-	fromClause += `\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
+	fromClause +=
+		`\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
 
 	if (dimSql.needsCampaignJoin) {
-		fromClause += `\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
+		fromClause +=
+			`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
 	}
 	if (dimSql.needsAdJoin) {
-		fromClause += `\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
+		fromClause +=
+			`\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
 	}
 	if (dimSql.needsFamilyJoin) {
 		fromClause += `\nLEFT JOIN brand_config_amazon_asin fam ON fam.asin = ${resolvedAsinExpr()}`;
 	}
 	if (dimSql.needsParentAsinJoin) {
-		fromClause += `\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExpr()}`;
+		fromClause +=
+			`\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExpr()}`;
 	}
 
 	// WHERE
@@ -696,7 +725,8 @@ function buildQuery1(
 			wheres.push(`camp.name = '${filter.value.replace(/'/g, "''")}'`);
 		} else {
 			// Need to add campaign join for filter
-			fromClause += `\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
+			fromClause +=
+				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
 			wheres.push(`camp_filt.name = '${filter.value.replace(/'/g, "''")}'`);
 		}
 	}
@@ -711,7 +741,9 @@ function buildQuery1(
 	// Deduplicate group by
 	const uniqueGroupBy = [...new Set(groupByCols)];
 
-	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${wheres.join("\n  AND ")}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
+	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
+		wheres.join("\n  AND ")
+	}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -754,20 +786,24 @@ function buildQuery2(
 	);
 
 	let fromClause = `FROM "amzadapi_reports_v1__product01__byDay" r`;
-	fromClause += `\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
+	fromClause +=
+		`\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
 
 	if (dimSql.needsCampaignJoin) {
-		fromClause += `\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
+		fromClause +=
+			`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
 	}
 	if (dimSql.needsAdJoin) {
-		fromClause += `\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
+		fromClause +=
+			`\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
 	}
 	if (dimSql.needsFamilyJoin) {
 		// For halo-in, family is on the converted product (the one that received halo)
 		fromClause += `\nLEFT JOIN brand_config_amazon_asin fam ON fam.asin = ${resolvedAsinExprProduct01()}`;
 	}
 	if (dimSql.needsParentAsinJoin) {
-		fromClause += `\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExprProduct01()}`;
+		fromClause +=
+			`\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExprProduct01()}`;
 	}
 
 	const wheres: string[] = [
@@ -783,7 +819,8 @@ function buildQuery2(
 		if (dimSql.needsCampaignJoin) {
 			wheres.push(`camp.name = '${filter.value.replace(/'/g, "''")}'`);
 		} else {
-			fromClause += `\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
+			fromClause +=
+				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
 			wheres.push(`camp_filt.name = '${filter.value.replace(/'/g, "''")}'`);
 		}
 	}
@@ -795,7 +832,9 @@ function buildQuery2(
 
 	const uniqueGroupBy = [...new Set(groupByCols)];
 
-	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${wheres.join("\n  AND ")}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
+	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
+		wheres.join("\n  AND ")
+	}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
 }
 
 // ---------------------------------------------------------------------------
