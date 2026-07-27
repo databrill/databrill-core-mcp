@@ -32,10 +32,12 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadEconomicsParams {
 	return {
-		stores: String(args.stores ?? ""),
-		when: String(args.when ?? ""),
-		products: typeof args.products === "string" ? args.products : undefined,
-		economics: (args.economics && typeof args.economics === "object") ? args.economics as EconomicsInput : null,
+		stores: String(args["stores"] ?? ""),
+		when: String(args["when"] ?? ""),
+		products: typeof args["products"] === "string" ? args["products"] : undefined,
+		economics: (args["economics"] && typeof args["economics"] === "object")
+			? args["economics"] as EconomicsInput
+			: null,
 	};
 }
 

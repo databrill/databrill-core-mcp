@@ -47,15 +47,15 @@ const inputSchema = {
 
 /** Map loosely-typed tool arguments to a `LoadConfig` (defaults match the agency report). */
 export function parseConfig(args: Record<string, unknown>): LoadConfig {
-	const storesRaw = typeof args.stores === "string" ? args.stores : undefined;
+	const storesRaw = typeof args["stores"] === "string" ? args["stores"] : undefined;
 	return {
 		stores: storesRaw ? storesRaw.split(",").map((s) => s.trim()).filter(Boolean) : null,
-		allStores: args.allStores === true,
-		recentDays: typeof args.recentDays === "number" ? args.recentDays : 7,
-		baselineDays: typeof args.baselineDays === "number" ? args.baselineDays : 28,
-		dropThreshold: typeof args.dropThreshold === "number" ? args.dropThreshold : 0.10,
-		inventoryRunwayMax: typeof args.inventoryRunwayMax === "number" ? args.inventoryRunwayMax : 14,
-		skipInventory: args.skipInventory === true,
+		allStores: args["allStores"] === true,
+		recentDays: typeof args["recentDays"] === "number" ? args["recentDays"] : 7,
+		baselineDays: typeof args["baselineDays"] === "number" ? args["baselineDays"] : 28,
+		dropThreshold: typeof args["dropThreshold"] === "number" ? args["dropThreshold"] : 0.10,
+		inventoryRunwayMax: typeof args["inventoryRunwayMax"] === "number" ? args["inventoryRunwayMax"] : 14,
+		skipInventory: args["skipInventory"] === true,
 	};
 }
 

@@ -6,7 +6,10 @@
  */
 
 import type postgres from "postgres";
+import type { AdMetrics } from "../../AdMetrics.ts";
 import { sinceDaysAgo } from "../../clientData.ts";
+import { groupByWith } from "../../groupByWith.ts";
+import { summarizeAdMetrics } from "../../summarizeAdMetrics.ts";
 import { resolveStores } from "../loadAds/loadAds.ts";
 import { loadLowInventory } from "./lowInventory.ts";
 import { loadFamilyWindow } from "./familyWindow.ts";
@@ -28,6 +31,10 @@ interface FamilyInv {
 	worstAsin: string | null;
 	worstAsinLabel: string | null;
 	worstAsinRunway: number | null;
+}
+
+interface FamilyAdSummary extends AdMetrics {
+	readonly totalSales: number;
 }
 
 function decide(
@@ -215,14 +222,17 @@ export async function loadInventoryPacing(
 	const merchantIds = [...new Set(stores.map((s) => s.merchantId))];
 	const since = sinceDaysAgo(config.spendWindowDays);
 	const familyWindow = await loadFamilyWindow(sql, merchantIds, since);
-	const adByKey = new Map<string, { spend: number; adSales: number; tacos: number | null }>();
-	for (const fa of familyWindow) {
-		adByKey.set(`${fa.merchantId}|||${fa.site.toUpperCase()}|||${fa.family}`, {
-			spend: fa.spend,
-			adSales: fa.adSales,
-			tacos: fa.tacos,
-		});
-	}
+	const adByKey = groupByWith(
+		familyWindow,
+		(row): string => `${row.merchantId}|||${row.site.toUpperCase()}|||${row.family}`,
+		(rows): FamilyAdSummary => {
+			const adMetrics = summarizeAdMetrics(rows);
+			return {
+				...adMetrics,
+				totalSales: rows.reduce((sum, row) => sum + row.totalSales, 0),
+			};
+		},
+	);
 
 	const out: PacingRow[] = [];
 	for (const [key, f] of fams) {
@@ -230,10 +240,10 @@ export async function loadInventoryPacing(
 		const runwayDays = velocityPerDay > 0 ? f.available / velocityPerDay : null;
 		const runwayWithInboundDays = velocityPerDay > 0 ? (f.available + f.inbound) / velocityPerDay : null;
 
-		const ad = adByKey.get(key);
-		const adSpendPerDay = (ad?.spend ?? 0) / Math.max(1, config.spendWindowDays);
+		const ad = adByKey[key];
+		const adSpendPerDay = (ad?.adSpend ?? 0) / Math.max(1, config.spendWindowDays);
 		const adSalesPerDay = (ad?.adSales ?? 0) / Math.max(1, config.spendWindowDays);
-		const tacos = ad?.tacos ?? null;
+		const tacos = ad && ad.totalSales > 0 ? ad.adSpend / ad.totalSales : null;
 
 		const { action, severity, rationale } = decide(
 			{

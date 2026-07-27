@@ -39,11 +39,11 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadTrafficParams {
 	return {
-		stores: String(args.stores ?? ""),
-		when: String(args.when ?? ""),
-		groupBy: typeof args.groupBy === "string" ? args.groupBy : undefined,
-		timeUnit: typeof args.timeUnit === "string" ? args.timeUnit : undefined,
-		products: typeof args.products === "string" ? args.products : undefined,
+		stores: String(args["stores"] ?? ""),
+		when: String(args["when"] ?? ""),
+		groupBy: typeof args["groupBy"] === "string" ? args["groupBy"] : undefined,
+		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+		products: typeof args["products"] === "string" ? args["products"] : undefined,
 	};
 }
 

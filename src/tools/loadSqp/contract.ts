@@ -32,11 +32,11 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadSqpParams {
 	return {
-		stores: String(args.stores ?? ""),
-		when: String(args.when ?? ""),
-		products: typeof args.products === "string" ? args.products : undefined,
-		timeUnit: typeof args.timeUnit === "string" ? args.timeUnit : undefined,
-		keywordLimit: typeof args.keywordLimit === "number" ? args.keywordLimit : undefined,
+		stores: String(args["stores"] ?? ""),
+		when: String(args["when"] ?? ""),
+		products: typeof args["products"] === "string" ? args["products"] : undefined,
+		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+		keywordLimit: typeof args["keywordLimit"] === "number" ? args["keywordLimit"] : undefined,
 	};
 }
 

@@ -40,7 +40,7 @@ export async function loadLowInventory(
 			FROM "amzreport_SALES_AND_TRAFFIC__skuByDay"
 			WHERE "marketplaceId" = ${marketplaceId} AND "merchantId" = ${merchantId}
 		`;
-		const maxSTDate: string | null = stMaxRow?.maxDate ?? null;
+		const maxSTDate: string | null = stMaxRow?.["maxDate"] ?? null;
 		const yesterdayMinus1 = DateTime.fromISO(yesterday).minus({ days: 1 }).toISODate()!;
 		const stEnd = maxSTDate && maxSTDate < yesterdayMinus1 ? maxSTDate : yesterdayMinus1;
 		const aoStart = DateTime.fromISO(stEnd).plus({ days: 1 }).toISODate()!;
@@ -59,10 +59,10 @@ export async function loadLowInventory(
 				GROUP BY "childAsin"
 			`;
 			for (const r of stRows) {
-				unitsByAsin.set(r.asin, {
+				unitsByAsin.set(r["asin"], {
 					units1d: 0,
-					units7d: Number(r.units7d) || 0,
-					units28d: Number(r.units28d) || 0,
+					units7d: Number(r["units7d"]) || 0,
+					units28d: Number(r["units28d"]) || 0,
 				});
 			}
 		}
@@ -81,16 +81,16 @@ export async function loadLowInventory(
 				GROUP BY "asin"
 			`;
 			for (const r of aoRows) {
-				const e = unitsByAsin.get(r.asin);
+				const e = unitsByAsin.get(r["asin"]);
 				if (e) {
-					e.units1d += Number(r.units1d) || 0;
-					e.units7d += Number(r.units7d) || 0;
-					e.units28d += Number(r.units28d) || 0;
+					e.units1d += Number(r["units1d"]) || 0;
+					e.units7d += Number(r["units7d"]) || 0;
+					e.units28d += Number(r["units28d"]) || 0;
 				} else {
-					unitsByAsin.set(r.asin, {
-						units1d: Number(r.units1d) || 0,
-						units7d: Number(r.units7d) || 0,
-						units28d: Number(r.units28d) || 0,
+					unitsByAsin.set(r["asin"], {
+						units1d: Number(r["units1d"]) || 0,
+						units7d: Number(r["units7d"]) || 0,
+						units28d: Number(r["units28d"]) || 0,
 					});
 				}
 			}
@@ -111,7 +111,7 @@ export async function loadLowInventory(
 				FROM "amzspapi_catalog_items_v20220401__catalogitem"
 				WHERE "asin" = ANY(${topAsins})
 			`;
-			for (const r of catalogRows) if (r.asin) parentAsinMap.set(r.asin, r.parentAsin ?? null);
+			for (const r of catalogRows) if (r["asin"]) parentAsinMap.set(r["asin"], r["parentAsin"] ?? null);
 		} catch { /* best-effort */ }
 		const missingParent = topAsins.filter((a) => !parentAsinMap.has(a));
 		if (missingParent.length > 0) {
@@ -123,7 +123,7 @@ export async function loadLowInventory(
 						AND "childAsin" = ANY(${missingParent})
 					ORDER BY "childAsin", "date" DESC
 				`;
-				for (const r of stParentRows) parentAsinMap.set(r.asin, r.parentAsin ?? null);
+				for (const r of stParentRows) parentAsinMap.set(r["asin"], r["parentAsin"] ?? null);
 			} catch { /* best-effort */ }
 		}
 
@@ -139,7 +139,7 @@ export async function loadLowInventory(
 			GROUP BY "doc"->>'asin'
 		`;
 		for (const r of fbaRows) {
-			fbaMap.set(r.asin, { inventoryFba: Number(r.inventoryFba) || 0, inbound: Number(r.inbound) || 0 });
+			fbaMap.set(r["asin"], { inventoryFba: Number(r["inventoryFba"]) || 0, inbound: Number(r["inbound"]) || 0 });
 		}
 
 		// Q5 — FBM inventory (best-effort)
@@ -156,7 +156,7 @@ export async function loadLowInventory(
 				) t
 				GROUP BY "asin"
 			`;
-			for (const r of fbmRows) fbmMap.set(r.asin, Number(r.inventoryFbm) || 0);
+			for (const r of fbmRows) fbmMap.set(r["asin"], Number(r["inventoryFbm"]) || 0);
 		} catch { /* best-effort */ }
 
 		// Q6 — family / label (best-effort)
@@ -170,9 +170,10 @@ export async function loadLowInventory(
 				WHERE aa."asin" = ANY(${topAsins})
 			`;
 			for (const r of familyRows) {
-				const ctlif = r.countryToLabelInFamily as Record<string, string> | null;
-				const label = (ctlif && ctlif[site]) ?? r.labelInFamily ?? r.labelStandalone ?? r.msku ?? r.asin;
-				familyMap.set(r.asin, { family: r.family ?? "**UNKNOWN**", label });
+				const ctlif = r["countryToLabelInFamily"] as Record<string, string> | null;
+				const label = (ctlif && ctlif[site]) ?? r["labelInFamily"] ?? r["labelStandalone"] ?? r["msku"] ??
+					r["asin"];
+				familyMap.set(r["asin"], { family: r["family"] ?? "**UNKNOWN**", label });
 			}
 		} catch {
 			for (const a of topAsins) familyMap.set(a, { family: "**ERROR**", label: a });

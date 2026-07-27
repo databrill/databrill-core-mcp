@@ -1,13 +1,15 @@
 /**
  * Mount every tool from the contract onto an MCP `Server`. This is the library
- * entry point: the stdio frontend (bin/stdio.ts) and the hosted frontend (P2,
- * in a separate repo) both call this — they differ only in how `getSql`
- * resolves the connection (POSTGRES_URL vs OAuth→wsid→pooled target DB).
+ * entry point: the stdio frontend (bin/stdio.ts) and the hosted frontend both
+ * call this — they differ only in how `getSql` resolves the connection
+ * (POSTGRES_URL vs OAuth→wsid→pooled target DB).
  *
- * When a multi-workspace `Config` is passed, each tool gains an optional `wsid`
+ * When a multi-workspace `WorkspaceDirectory` is passed, each tool gains an optional `wsid`
  * argument (enum of the configured workspaces) and a `listWorkspaces` discovery
  * tool is exposed. `getSql` receives the call's arguments so it can route to the
- * right workspace connection.
+ * right workspace connection. The directory carries no `database` field, so its keys and
+ * `wsids`/`multiWorkspace` are recomputed on every `tools/list` call rather than
+ * cached at registration time — a hosted session's workspace set can change mid-session.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -17,15 +19,15 @@ import {
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Sql } from "postgres";
-import { type Config, summarizeConfig } from "./config.ts";
+import { summarizeConfig, type WorkspaceDirectory } from "./config.ts";
 import { tools } from "./contract.ts";
 
 const LIST_WORKSPACES = "listWorkspaces";
 
 /** Add an optional `wsid` enum property to a tool's input schema (non-destructively). */
 function withWsid(inputSchema: Record<string, unknown>, wsids: string[]): Record<string, unknown> {
-	const properties = { ...(inputSchema.properties as Record<string, unknown> | undefined) };
-	properties.wsid = {
+	const properties = { ...(inputSchema["properties"] as Record<string, unknown> | undefined) };
+	properties["wsid"] = {
 		type: "string",
 		enum: wsids,
 		description:
@@ -38,12 +40,12 @@ function withWsid(inputSchema: Record<string, unknown>, wsids: string[]): Record
 export function registerTools(
 	server: Server,
 	getSql: (args: Record<string, unknown>) => Sql,
-	config?: Config | null,
+	config?: WorkspaceDirectory | null,
 ): void {
-	const wsids = config ? Object.keys(config.workspaces) : [];
-	const multiWorkspace = wsids.length > 1;
-
 	server.setRequestHandler(ListToolsRequestSchema, () => {
+		const wsids = config ? Object.keys(config.workspaces) : [];
+		const multiWorkspace = wsids.length > 1;
+
 		const listed = tools.map((t) => ({
 			name: t.name,
 			description: t.description,

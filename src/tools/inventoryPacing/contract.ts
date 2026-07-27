@@ -30,14 +30,14 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadInventoryPacingParams {
 	return {
-		stores: String(args.stores ?? ""),
-		velocityDays: num(args.velocityDays),
-		spendWindowDays: num(args.spendWindowDays),
-		criticalDays: num(args.criticalDays),
-		lowDays: num(args.lowDays),
-		overstockDays: num(args.overstockDays),
-		minSpendPerDay: num(args.minSpendPerDay),
-		minVelocity: num(args.minVelocity),
+		stores: String(args["stores"] ?? ""),
+		velocityDays: num(args["velocityDays"]),
+		spendWindowDays: num(args["spendWindowDays"]),
+		criticalDays: num(args["criticalDays"]),
+		lowDays: num(args["lowDays"]),
+		overstockDays: num(args["overstockDays"]),
+		minSpendPerDay: num(args["minSpendPerDay"]),
+		minVelocity: num(args["minVelocity"]),
 	};
 }
 

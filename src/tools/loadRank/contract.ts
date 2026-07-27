@@ -27,9 +27,9 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadRankParams {
 	return {
-		stores: String(args.stores ?? ""),
-		when: String(args.when ?? ""),
-		products: typeof args.products === "string" ? args.products : undefined,
+		stores: String(args["stores"] ?? ""),
+		when: String(args["when"] ?? ""),
+		products: typeof args["products"] === "string" ? args["products"] : undefined,
 	};
 }
 

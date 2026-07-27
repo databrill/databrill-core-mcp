@@ -46,13 +46,13 @@ export async function loadEconomics(params: LoadEconomicsParams, sql: postgres.S
 	);
 
 	const rollup: AdvertisedAsinRollup[] = ads.data.map((r) => {
-		const spend = Number(r.spend ?? 0);
-		const clicks = Number(r.clicks ?? 0);
-		const units = Number(r.units ?? 0);
-		const revenue = Number(r.revenue ?? 0);
-		const haloRev = Number(r.revenueHaloIn ?? 0);
+		const spend = Number(r["spend"] ?? 0);
+		const clicks = Number(r["clicks"] ?? 0);
+		const units = Number(r["units"] ?? 0);
+		const revenue = Number(r["revenue"] ?? 0);
+		const haloRev = Number(r["revenueHaloIn"] ?? 0);
 		return {
-			asin: String(r.asin ?? ""),
+			asin: String(r["asin"] ?? ""),
 			totalSpend: round2(spend),
 			totalDirectOrders: units,
 			totalDirectRev: round2(revenue),

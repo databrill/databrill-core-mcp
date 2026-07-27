@@ -74,17 +74,17 @@ export async function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Promise
 	`;
 
 	const periods: SqpPeriodRow[] = periodRows.map((r) => {
-		const marketplaceId = String(r.marketplaceId);
-		const ourImpr = Number(r.our_impr ?? 0);
-		const marketImpr = Number(r.market_impr ?? 0);
-		const ourClicks = Number(r.our_clicks ?? 0);
-		const marketClicks = Number(r.market_clicks ?? 0);
-		const ourPurchases = Number(r.our_purch ?? 0);
-		const marketPurchases = Number(r.market_purch ?? 0);
+		const marketplaceId = String(r["marketplaceId"]);
+		const ourImpr = Number(r["our_impr"] ?? 0);
+		const marketImpr = Number(r["market_impr"] ?? 0);
+		const ourClicks = Number(r["our_clicks"] ?? 0);
+		const marketClicks = Number(r["market_clicks"] ?? 0);
+		const ourPurchases = Number(r["our_purch"] ?? 0);
+		const marketPurchases = Number(r["market_purch"] ?? 0);
 		return {
 			country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
 			marketplaceId,
-			period: String(r.period),
+			period: String(r["period"]),
 			ourImpr,
 			marketImpr,
 			ourClicks,
@@ -118,14 +118,14 @@ export async function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Promise
 	`;
 
 	const keywords: SqpKeywordRow[] = keywordRows.map((r) => {
-		const mktImpr = Number(r.mkt_impr ?? 0);
-		const ourImpr = Number(r.our_impr ?? 0);
-		const mktClicks = Number(r.mkt_clicks ?? 0);
-		const ourClicks = Number(r.our_clicks ?? 0);
-		const mktPurch = Number(r.mkt_purch ?? 0);
-		const ourPurch = Number(r.our_purch ?? 0);
+		const mktImpr = Number(r["mkt_impr"] ?? 0);
+		const ourImpr = Number(r["our_impr"] ?? 0);
+		const mktClicks = Number(r["mkt_clicks"] ?? 0);
+		const ourClicks = Number(r["our_clicks"] ?? 0);
+		const mktPurch = Number(r["mkt_purch"] ?? 0);
+		const ourPurch = Number(r["our_purch"] ?? 0);
 		return {
-			q: String(r.q ?? ""),
+			q: String(r["q"] ?? ""),
 			mktImpr,
 			ourImpr,
 			imprShare: share(ourImpr, mktImpr),

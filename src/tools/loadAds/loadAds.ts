@@ -182,11 +182,11 @@ export async function resolveStores(spec: string, sql: postgres.Sql): Promise<Re
 		merchantsByMarketplace.set(r.marketplaceId, arr);
 	}
 
-	const seen = new Set<string>(); // `${merchantId}\x00${marketplaceId}`
+	const seen = new Set<string>(); // `${merchantId}\t${marketplaceId}`
 	const result: ResolvedStore[] = [];
 
 	const pushStore = (merchantId: string, merchantName: string, info: AmazonMarketplaceInfo) => {
-		const key = `${merchantId}\x00${info.marketplaceId}`;
+		const key = `${merchantId}\t${info.marketplaceId}`;
 		if (seen.has(key)) return;
 		seen.add(key);
 		result.push({
@@ -337,7 +337,7 @@ export async function resolveWhen(
 				SELECT MAX(date)::text AS latest
 				FROM "amzadapi_reports_v1__search_asin_placement__byDay"
 			`;
-			const latest = latestRow[0]?.latest;
+			const latest = latestRow[0]?.["latest"];
 			if (!latest) fail("No ad data found in database");
 			const from = addDurationDays(latest, ast, -1);
 			return { dateFirst: from, dateLast: latest };
@@ -368,7 +368,7 @@ export async function resolveProducts(
 				WHERE parent_asin = ${token}
 			`;
 			if (children.length > 0) {
-				for (const row of children) childAsins.add(row.asin);
+				for (const row of children) childAsins.add(row["asin"]);
 			} else {
 				// Treat as child ASIN directly
 				childAsins.add(token);
@@ -383,7 +383,7 @@ export async function resolveProducts(
 			if (rows.length === 0) {
 				console.error(`Warning: no ASINs found for family '${token}'`);
 			}
-			for (const row of rows) childAsins.add(row.asin);
+			for (const row of rows) childAsins.add(row["asin"]);
 		}
 	}
 
@@ -455,6 +455,32 @@ function timeUnitGroupBy(tu: TimeUnit): string {
 }
 
 const TIME_UNIT_OUTPUT_COLS = ["dateFirst", "dateLast"];
+
+// Dimensions that resolve to a specific product (directly or via family/parentAsin
+// lookup keyed on the resolved ASIN). Their presence in groupBy means the query is
+// at ASIN/product grain rather than store/total grain.
+const PRODUCT_GRAIN_DIMS: readonly GroupByDim[] = ["asin", "family", "parentAsin"];
+
+function isProductGrain(dims: readonly GroupByDim[]): boolean {
+	return dims.some((d) => PRODUCT_GRAIN_DIMS.includes(d));
+}
+
+// Sponsored Brands rows appear twice in both search_asin_placement__byDay and
+// product01__byDay: an aggregate row (advertisedProductId = '') carrying the true
+// campaign total, and per-ASIN breakdown rows that re-report a split of that spend.
+// Summing both double-counts SB.
+//
+//   - store/total grain: keep the aggregate row only and drop the per-ASIN rows
+//     (SP/SD have no aggregate row and are unaffected).
+//   - ASIN/product grain: keep the per-ASIN breakdown rows instead (the aggregate
+//     row only resolves to the ad's *first* creative ASIN via sb_asin_lookup, which
+//     would misattribute — or omit — spend for every other ASIN in the campaign) and
+//     drop the aggregate row so it isn't summed on top of the per-ASIN split.
+function sbDoubleCountFilter(tableAlias: "r", productGrain: boolean): string {
+	return productGrain
+		? `NOT (${tableAlias}."adProduct" = 'Sponsored Brands' AND ${tableAlias}."advertisedProductId" = '')`
+		: `NOT (${tableAlias}."adProduct" = 'Sponsored Brands' AND ${tableAlias}."advertisedProductId" <> '')`;
+}
 
 // Build resolved ASIN expression for the main query
 // Handles SB ASIN resolution via sb_asin_lookup CTE
@@ -653,6 +679,7 @@ function buildQuery1(
 	filter: FilterExpr | null,
 ): string {
 	const dimSql = buildDimSql(dims, stores, "r", false);
+	const productGrain = isProductGrain(dims);
 
 	// sb_asin_lookup CTE
 	const sbCte = `sb_asin_lookup AS (
@@ -716,6 +743,7 @@ function buildQuery1(
 		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`),
 		`r.date >= '${range.dateFirst}'`,
 		`r.date <= '${range.dateLast}'`,
+		sbDoubleCountFilter("r", productGrain),
 	];
 	if (productAsins) {
 		wheres.push(`${resolvedAsinExpr()} IN (${productAsins.map((a) => `'${a}'`).join(",")})`);
@@ -761,6 +789,7 @@ function buildQuery2(
 	// For halo-in, the ASIN is convertedProductId (which product received the halo)
 	// We still need sb_asin_lookup for dimensions that depend on the advertised product
 	const dimSql = buildDimSql(dims, stores, "r", true);
+	const productGrain = isProductGrain(dims);
 
 	const sbCte = `sb_asin_lookup AS (
 		SELECT "adId", "marketplaceId",
@@ -811,6 +840,11 @@ function buildQuery2(
 		`r.date >= '${range.dateFirst}'`,
 		`r.date <= '${range.dateLast}'`,
 		`r."productRelevance" = 'Brand halo'`,
+		// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
+		// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
+		// is populated on both the aggregate and per-ASIN rows, so grain is driven by the
+		// requested dims, not by which column this query keys on).
+		sbDoubleCountFilter("r", productGrain),
 	];
 	if (productAsins) {
 		wheres.push(`${resolvedAsinExprProduct01()} IN (${productAsins.map((a) => `'${a}'`).join(",")})`);
@@ -842,7 +876,7 @@ function buildQuery2(
 // ---------------------------------------------------------------------------
 
 function buildMergeKey(row: Record<string, unknown>, keyCols: string[]): string {
-	return keyCols.map((c) => String(row[c] ?? "")).join("\x00");
+	return keyCols.map((c) => String(row[c] ?? "")).join("\t");
 }
 
 function mergeResults(
@@ -904,26 +938,26 @@ function mergeResults(
 		}
 
 		// Advertised metrics (from q1)
-		const impressions = isQ1 ? Number(q1Row.impressions ?? 0) : 0;
-		const clicks = isQ1 ? Number(q1Row.clicks ?? 0) : 0;
-		const addToCart = isQ1 ? Number(q1Row.addToCart ?? 0) : 0;
-		const purchases = isQ1 ? Number(q1Row.purchases ?? 0) : 0;
-		const units = isQ1 ? Number(q1Row.units ?? 0) : 0;
-		const spend = isQ1 ? Number(q1Row.spend ?? 0) : 0;
-		const revenue = isQ1 ? Number(q1Row.revenue ?? 0) : 0;
+		const impressions = isQ1 ? Number(q1Row["impressions"] ?? 0) : 0;
+		const clicks = isQ1 ? Number(q1Row["clicks"] ?? 0) : 0;
+		const addToCart = isQ1 ? Number(q1Row["addToCart"] ?? 0) : 0;
+		const purchases = isQ1 ? Number(q1Row["purchases"] ?? 0) : 0;
+		const units = isQ1 ? Number(q1Row["units"] ?? 0) : 0;
+		const spend = isQ1 ? Number(q1Row["spend"] ?? 0) : 0;
+		const revenue = isQ1 ? Number(q1Row["revenue"] ?? 0) : 0;
 
 		// Halo-out (from q1)
-		const purchasesHaloOut = isQ1 ? Number(q1Row.purchasesHaloOut ?? 0) : 0;
-		const unitsHaloOut = isQ1 ? Number(q1Row.unitsHaloOut ?? 0) : 0;
-		const revenueHaloOut = isQ1 ? Number(q1Row.revenueHaloOut ?? 0) : 0;
+		const purchasesHaloOut = isQ1 ? Number(q1Row["purchasesHaloOut"] ?? 0) : 0;
+		const unitsHaloOut = isQ1 ? Number(q1Row["unitsHaloOut"] ?? 0) : 0;
+		const revenueHaloOut = isQ1 ? Number(q1Row["revenueHaloOut"] ?? 0) : 0;
 
 		// Halo-in (from q2)
-		const purchasesHaloIn = q2Row ? Number(q2Row.purchasesHaloIn ?? 0) : 0;
-		const unitsHaloIn = q2Row ? Number(q2Row.unitsHaloIn ?? 0) : 0;
-		const revenueHaloIn = q2Row ? Number(q2Row.revenueHaloIn ?? 0) : 0;
+		const purchasesHaloIn = q2Row ? Number(q2Row["purchasesHaloIn"] ?? 0) : 0;
+		const unitsHaloIn = q2Row ? Number(q2Row["unitsHaloIn"] ?? 0) : 0;
+		const revenueHaloIn = q2Row ? Number(q2Row["revenueHaloIn"] ?? 0) : 0;
 
 		if (nestedFlag) {
-			outRow.adStats = {
+			outRow["adStats"] = {
 				impressions,
 				clicks,
 				addToCart,
@@ -932,7 +966,7 @@ function mergeResults(
 				spend: round2(spend),
 				revenue: round2(revenue),
 			};
-			outRow.adStatsHaloOut = {
+			outRow["adStatsHaloOut"] = {
 				impressions: null,
 				clicks: null,
 				addToCart: null,
@@ -941,7 +975,7 @@ function mergeResults(
 				spend: null,
 				revenue: round2(revenueHaloOut),
 			};
-			outRow.adStatsHaloIn = {
+			outRow["adStatsHaloIn"] = {
 				impressions: null,
 				clicks: null,
 				addToCart: null,
@@ -951,19 +985,19 @@ function mergeResults(
 				revenue: round2(revenueHaloIn),
 			};
 		} else {
-			outRow.impressions = impressions;
-			outRow.clicks = clicks;
-			outRow.addToCart = addToCart;
-			outRow.purchases = purchases;
-			outRow.units = units;
-			outRow.spend = round2(spend);
-			outRow.revenue = round2(revenue);
-			outRow.purchasesHaloOut = purchasesHaloOut;
-			outRow.unitsHaloOut = unitsHaloOut;
-			outRow.revenueHaloOut = round2(revenueHaloOut);
-			outRow.purchasesHaloIn = purchasesHaloIn;
-			outRow.unitsHaloIn = unitsHaloIn;
-			outRow.revenueHaloIn = round2(revenueHaloIn);
+			outRow["impressions"] = impressions;
+			outRow["clicks"] = clicks;
+			outRow["addToCart"] = addToCart;
+			outRow["purchases"] = purchases;
+			outRow["units"] = units;
+			outRow["spend"] = round2(spend);
+			outRow["revenue"] = round2(revenue);
+			outRow["purchasesHaloOut"] = purchasesHaloOut;
+			outRow["unitsHaloOut"] = unitsHaloOut;
+			outRow["revenueHaloOut"] = round2(revenueHaloOut);
+			outRow["purchasesHaloIn"] = purchasesHaloIn;
+			outRow["unitsHaloIn"] = unitsHaloIn;
+			outRow["revenueHaloIn"] = round2(revenueHaloIn);
 		}
 
 		// Derived metrics (on advertised stats only)
@@ -976,7 +1010,7 @@ function mergeResults(
 				roas: spend > 0 ? round2(revenue / spend) : null,
 			};
 			if (nestedFlag) {
-				outRow.derived = derived;
+				outRow["derived"] = derived;
 			} else {
 				Object.assign(outRow, derived);
 			}

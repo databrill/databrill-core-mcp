@@ -28,7 +28,7 @@ export async function discoverMerchantIds(sql: Sql): Promise<string[]> {
 		WHERE "isActive" = true
 		ORDER BY "merchantId"
 	`;
-	return rows.map((r) => String(r.merchantId));
+	return rows.map((r) => String(r["merchantId"]));
 }
 
 /** Canonical-country set of the client's real, active stores, from `amazon_store`. */
@@ -39,7 +39,7 @@ export async function discoverConfiguredCountries(sql: Sql): Promise<Set<string>
 		WHERE "isActive" = true AND "isReal" = true
 	`;
 	const set = new Set<string>();
-	for (const r of rows) set.add(canonCountry(String(r.countryCode)));
+	for (const r of rows) set.add(canonCountry(String(r["countryCode"])));
 	return set;
 }
 
@@ -170,16 +170,16 @@ async function loadDailySalesBySite(sql: Sql, merchantIds: string[], since: stri
 	`;
 	const out: DailySales[] = [];
 	for (const r of rows) {
-		const site = siteOf(r.marketplaceId);
+		const site = siteOf(r["marketplaceId"]);
 		if (!site) continue;
 		out.push({
-			date: isoDate(r.date),
-			merchantId: r.merchantId,
+			date: isoDate(r["date"]),
+			merchantId: r["merchantId"],
 			site,
-			currency: r.currency ?? "",
-			sales: Number(r.sales ?? 0),
-			units: Number(r.units ?? 0),
-			orders: Number(r.orders ?? 0),
+			currency: r["currency"] ?? "",
+			sales: Number(r["sales"] ?? 0),
+			units: Number(r["units"] ?? 0),
+			orders: Number(r["orders"] ?? 0),
 		});
 	}
 	return out;
@@ -200,21 +200,31 @@ async function loadDailyAdBySite(sql: Sql, merchantIds: string[], since: string)
 		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
 		WHERE "merchantId" = ANY(${merchantIds})
 			AND "date" >= ${since}
+			-- Sponsored Brands stores each cost twice: an aggregate row
+			-- (advertisedProductId = '') and per-ASIN breakdown rows. Keep the
+			-- aggregate row only so SB is not double-counted; SP/SD are unaffected.
+			-- This query groups by date/merchant/marketplace only (store/total grain,
+			-- see loadStoreSeries/mergeDaily below — no ASIN dimension), so the
+			-- level-aware refinement in loadAds.ts's sbDoubleCountFilter (which keeps
+			-- per-ASIN SB rows instead at ASIN/product grain) does not apply here: the
+			-- aggregate-only filter is already the correct behavior for every caller
+			-- of this function.
+			AND NOT ("adProduct" = 'Sponsored Brands' AND "advertisedProductId" <> '')
 		GROUP BY "date", "merchantId", "marketplaceId"
 	`;
 	const out: DailyAd[] = [];
 	for (const r of rows) {
-		const site = siteOf(r.marketplaceId);
+		const site = siteOf(r["marketplaceId"]);
 		if (!site) continue;
 		out.push({
-			date: isoDate(r.date),
-			merchantId: r.merchantId,
+			date: isoDate(r["date"]),
+			merchantId: r["merchantId"],
 			site,
-			spend: Number(r.spend ?? 0),
-			clicks: Number(r.clicks ?? 0),
-			impressions: Number(r.impressions ?? 0),
-			orders: Number(r.orders ?? 0),
-			adSales: Number(r.adSales ?? 0),
+			spend: Number(r["spend"] ?? 0),
+			clicks: Number(r["clicks"] ?? 0),
+			impressions: Number(r["impressions"] ?? 0),
+			orders: Number(r["orders"] ?? 0),
+			adSales: Number(r["adSales"] ?? 0),
 		});
 	}
 	return out;
@@ -241,13 +251,13 @@ async function loadDailySessionsBySite(sql: Sql, merchantIds: string[], since: s
 		`;
 		const out: DailySessions[] = [];
 		for (const r of rows) {
-			const site = siteOf(r.marketplaceId);
+			const site = siteOf(r["marketplaceId"]);
 			if (!site) continue;
 			out.push({
-				date: isoDate(r.date),
-				merchantId: r.merchantId,
+				date: isoDate(r["date"]),
+				merchantId: r["merchantId"],
 				site,
-				sessions: Number(r.sessions ?? 0),
+				sessions: Number(r["sessions"] ?? 0),
 			});
 		}
 		return out;

@@ -50,6 +50,36 @@ export interface Config {
 	readonly byMerchant: ReadonlyMap<string, string>;
 }
 
+/**
+ * A credential-free view of a workspace: everything a directory listing may disclose, and nothing that
+ * could open a connection. No `database` field — see `DirectoryWorkspace`.
+ */
+export interface DirectoryWorkspace {
+	readonly wsid: string;
+	readonly label?: string;
+	readonly merchants?: Readonly<Record<string, Merchant>>;
+}
+
+/**
+ * The credential-free shape `registerTools`, `summarizeConfig` and `resolveWorkspace` need: enough to
+ * enumerate, describe and select workspaces, with no `database` connection data anywhere in it.
+ * `Config` satisfies this structurally (it has everything `WorkspaceDirectory` asks for, plus
+ * `database` on each workspace), so every existing caller that constructs and passes a real `Config`
+ * keeps compiling unchanged.
+ *
+ * The lookup maps are `ReadonlyMap` so `Config`'s `Map`-typed fields stay assignable.
+ */
+export interface WorkspaceDirectory {
+	readonly workspaces: Readonly<Record<string, DirectoryWorkspace>>;
+	/** country code (canonicalised) → wsids that sell there */
+	readonly byCountry: ReadonlyMap<string, readonly string[]>;
+	/** merchantId → its (single) wsid */
+	readonly byMerchant: ReadonlyMap<string, string>;
+}
+
+/** Just the lookup maps: what `stores` inference reads, with no workspace map involved. */
+type WorkspaceLookups = Pick<WorkspaceDirectory, "byCountry" | "byMerchant">;
+
 /** UK is an alias for GB throughout Amazon's data; collapse it for matching. */
 function canonCountry(code: string): string {
 	const up = code.trim().toUpperCase();
@@ -81,7 +111,7 @@ function expandEnv(raw: string): string {
  * file so a bad config fails loudly at startup rather than mid-request.
  */
 export function loadConfig(): Config | null {
-	const path = process.env.DATABRILL_CONFIG;
+	const path = process.env["DATABRILL_CONFIG"];
 	if (!path) return null;
 
 	const abs = isAbsolute(path) ? path : resolvePath(process.cwd(), path);
@@ -110,7 +140,7 @@ function build(parsed: unknown, source: string): Config {
 	};
 
 	if (typeof parsed !== "object" || parsed === null) fail("root must be an object");
-	const rawWorkspaces = (parsed as Record<string, unknown>).workspaces;
+	const rawWorkspaces = (parsed as Record<string, unknown>)["workspaces"];
 	if (typeof rawWorkspaces !== "object" || rawWorkspaces === null) {
 		fail('missing "workspaces" object');
 	}
@@ -123,14 +153,14 @@ function build(parsed: unknown, source: string): Config {
 		if (typeof rawWs !== "object" || rawWs === null) fail(`workspace "${wsid}" must be an object`);
 		const ws = rawWs as Record<string, unknown>;
 
-		const db = ws.database as Record<string, unknown> | undefined;
-		const postgresUrl = db?.postgresUrl;
+		const db = ws["database"] as Record<string, unknown> | undefined;
+		const postgresUrl = db?.["postgresUrl"];
 		if (typeof postgresUrl !== "string" || !postgresUrl) {
 			fail(`workspace "${wsid}" missing database.postgresUrl`);
 		}
-		const schema = typeof db?.schema === "string" && db.schema ? db.schema : `w${wsid}`;
+		const schema = typeof db?.["schema"] === "string" && db["schema"] ? db["schema"] : `w${wsid}`;
 
-		const rawMerchants = ws.merchants;
+		const rawMerchants = ws["merchants"];
 		if (typeof rawMerchants !== "object" || rawMerchants === null) {
 			fail(`workspace "${wsid}" missing "merchants" object`);
 		}
@@ -139,7 +169,7 @@ function build(parsed: unknown, source: string): Config {
 		for (const [merchantId, rawM] of Object.entries(rawMerchants as Record<string, unknown>)) {
 			if (typeof rawM !== "object" || rawM === null) fail(`merchant "${merchantId}" must be an object`);
 			const m = rawM as Record<string, unknown>;
-			const countriesRaw = m.countries;
+			const countriesRaw = m["countries"];
 			if (!Array.isArray(countriesRaw) || countriesRaw.length === 0) {
 				fail(`merchant "${merchantId}" needs a non-empty "countries" array`);
 			}
@@ -163,14 +193,14 @@ function build(parsed: unknown, source: string): Config {
 			}
 
 			merchants[merchantId] = {
-				name: typeof m.name === "string" ? m.name : undefined,
+				name: typeof m["name"] === "string" ? m["name"] : undefined,
 				countries,
 			};
 		}
 
 		workspaces[wsid] = {
 			wsid,
-			label: typeof ws.label === "string" ? ws.label : undefined,
+			label: typeof ws["label"] === "string" ? ws["label"] : undefined,
 			database: { postgresUrl: postgresUrl as string, schema },
 			merchants,
 		};
@@ -189,7 +219,7 @@ function tokenize(stores: unknown): string[] {
 }
 
 /** Which workspaces could a `stores` argument refer to? (country / merchant / region tokens) */
-function candidateWsids(config: Config, stores: unknown): Set<string> {
+function candidateWsids(config: WorkspaceLookups, stores: unknown): Set<string> {
 	const wsids = new Set<string>();
 	for (const raw of tokenize(stores)) {
 		const t = raw.trim();
@@ -227,11 +257,20 @@ function candidateWsids(config: Config, stores: unknown): Set<string> {
  * configured workspace → inference from the `stores` argument. Throws (listing the
  * options) when the call is ambiguous or names an unknown workspace, so the agent
  * can retry with an explicit `wsid`.
+ *
+ * Generic over the workspace type so this ONE inference rule serves both a file-loaded
+ * `Config` (returning a `Workspace`, whose `database` the stdio frontend then reads) and a
+ * credential-free `WorkspaceDirectory` (returning only the `wsid` its caller needs). A second
+ * implementation of the order above would let the same `stores` argument pick different
+ * workspaces in different frontends.
  */
-export function resolveWorkspace(config: Config, args: Record<string, unknown>): Workspace {
+export function resolveWorkspace<W extends DirectoryWorkspace>(
+	config: WorkspaceLookups & { readonly workspaces: Readonly<Record<string, W>> },
+	args: Record<string, unknown>,
+): W {
 	const ids = Object.keys(config.workspaces);
 
-	const wsidArg = typeof args.wsid === "string" ? args.wsid.trim() : "";
+	const wsidArg = typeof args["wsid"] === "string" ? args["wsid"].trim() : "";
 	if (wsidArg) {
 		const ws = config.workspaces[wsidArg];
 		if (!ws) throw new Error(`Unknown wsid "${wsidArg}". Configured workspaces: ${ids.join(", ")}`);
@@ -240,7 +279,7 @@ export function resolveWorkspace(config: Config, args: Record<string, unknown>):
 
 	if (ids.length === 1) return config.workspaces[ids[0]!]!;
 
-	const cands = [...candidateWsids(config, args.stores)];
+	const cands = [...candidateWsids(config, args["stores"])];
 	if (cands.length === 1) return config.workspaces[cands[0]!]!;
 	if (cands.length > 1) {
 		throw new Error(
@@ -251,12 +290,12 @@ export function resolveWorkspace(config: Config, args: Record<string, unknown>):
 }
 
 /** A JSON-friendly summary of the configured workspaces, for the listWorkspaces tool. */
-export function summarizeConfig(config: Config): unknown {
+export function summarizeConfig(config: WorkspaceDirectory): unknown {
 	return {
 		workspaces: Object.values(config.workspaces).map((w) => ({
 			wsid: w.wsid,
 			label: w.label,
-			merchants: Object.entries(w.merchants).map(([merchantId, m]) => ({
+			merchants: Object.entries(w.merchants ?? {}).map(([merchantId, m]) => ({
 				merchantId,
 				name: m.name,
 				countries: m.countries,

@@ -268,7 +268,7 @@ function resolvedStoresFor(diagnoses: StoreDiagnosis[]): ResolvedStore[] {
 	for (const d of diagnoses) {
 		const info = countryCodeToMarketplaceInfo[d.site.toUpperCase()];
 		if (!info) continue;
-		const key = `${d.merchantId}\x00${info.marketplaceId}`;
+		const key = `${d.merchantId}\t${info.marketplaceId}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
 		stores.push({

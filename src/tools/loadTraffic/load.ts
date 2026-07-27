@@ -34,7 +34,7 @@ function storePairsClause(stores: ResolvedStore[], alias: string): string {
 	const seen = new Set<string>();
 	const pairs: string[] = [];
 	for (const s of stores) {
-		const k = `${s.merchantId}\x00${s.marketplaceId}`;
+		const k = `${s.merchantId}\t${s.marketplaceId}`;
 		if (seen.has(k)) continue;
 		seen.add(k);
 		pairs.push(`('${s.merchantId}', '${s.marketplaceId}')`);
@@ -121,20 +121,20 @@ export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql):
 	const rows = await sql.unsafe(query) as Array<Record<string, unknown>>;
 
 	const data: TrafficRow[] = rows.map((r) => {
-		const sessions = Number(r.sessions ?? 0);
-		const units = Number(r.units ?? 0);
-		const marketplaceId = String(r.marketplaceId);
+		const sessions = Number(r["sessions"] ?? 0);
+		const units = Number(r["units"] ?? 0);
+		const marketplaceId = String(r["marketplaceId"]);
 		const out: TrafficRow = {
 			country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
 			marketplaceId,
-			period: String(r.period),
+			period: String(r["period"]),
 			sessions,
 			units,
-			sales: round2(Number(r.sales ?? 0)),
+			sales: round2(Number(r["sales"] ?? 0)),
 			cr: sessions > 0 ? round2((units / sessions) * 100) : 0,
 		};
-		if (groupBy === "family") out.family = String(r.family ?? "(unmapped)");
-		else out.asin = String(r.asin ?? "");
+		if (groupBy === "family") out.family = String(r["family"] ?? "(unmapped)");
+		else out.asin = String(r["asin"] ?? "");
 		return out;
 	});
 

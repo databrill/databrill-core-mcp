@@ -54,14 +54,14 @@ const inputSchema = {
 
 function parseParams(args: Record<string, unknown>): LoadAdsParams {
 	return {
-		stores: String(args.stores ?? ""),
-		when: String(args.when ?? ""),
-		groupBy: String(args.groupBy ?? ""),
-		timeUnit: typeof args.timeUnit === "string" ? args.timeUnit : undefined,
-		products: typeof args.products === "string" ? args.products : undefined,
-		filter: typeof args.filter === "string" ? args.filter : undefined,
-		derived: typeof args.derived === "boolean" ? args.derived : undefined,
-		nested: typeof args.nested === "boolean" ? args.nested : undefined,
+		stores: String(args["stores"] ?? ""),
+		when: String(args["when"] ?? ""),
+		groupBy: String(args["groupBy"] ?? ""),
+		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+		products: typeof args["products"] === "string" ? args["products"] : undefined,
+		filter: typeof args["filter"] === "string" ? args["filter"] : undefined,
+		derived: typeof args["derived"] === "boolean" ? args["derived"] : undefined,
+		nested: typeof args["nested"] === "boolean" ? args["nested"] : undefined,
 		format: "json",
 	};
 }
