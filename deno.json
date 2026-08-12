@@ -5,7 +5,9 @@
 		"fmt:check": "deno fmt --check",
 		"lint": "deno lint",
 		"check": "deno check",
-		"static": "deno --quiet fmt && deno task check && deno task lint"
+		"static": "deno --quiet fmt && deno task check && deno task lint",
+		"static:ci": "deno --quiet task fmt:check && deno task check && deno task lint",
+		"ci": "deno task static:ci"
 	},
 	"fmt": {
 		"useTabs": true,

@@ -4,10 +4,10 @@ import {
 	type AmazonMarketplaceInfo,
 	countryCodeToMarketplaceInfo,
 	marketplaceIdToMarketplaceInfo,
-	marketplaceInfos,
 	regionCountryCodes,
 } from "../../amazonConstants.ts";
 import { parseWhenAst, type WhenAst_Duration } from "../../parseWhenAst.ts";
+import { createSqlParams, type SqlParams } from "../../sqlParams.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -134,7 +134,7 @@ interface StoreRow {
 function resolveScope(raw: string): AmazonMarketplaceInfo[] {
 	const t = raw.trim();
 	if (!t) return [];
-	if (t === "*") return [...marketplaceInfos];
+	if (t === "*") return Object.values(marketplaceIdToMarketplaceInfo);
 	const up = t.toUpperCase();
 	if (up in regionCountryCodes) {
 		const infos: AmazonMarketplaceInfo[] = [];
@@ -145,7 +145,9 @@ function resolveScope(raw: string): AmazonMarketplaceInfo[] {
 		return infos;
 	}
 	const byCc = countryCodeToMarketplaceInfo[up];
-	if (byCc) return [byCc];
+	// Route through the marketplaceId-keyed map so the GB/UK alias pair always
+	// surfaces with the canonical "GB" label, whichever spelling the token used.
+	if (byCc) return [marketplaceIdToMarketplaceInfo[byCc.marketplaceId] ?? byCc];
 	// Marketplace IDs are case-sensitive; don't uppercase.
 	const byId = marketplaceIdToMarketplaceInfo[t];
 	if (byId) return [byId];
@@ -271,9 +273,18 @@ function distinctMerchants(stores: ResolvedStore[]): ResolvedStore[] {
 }
 
 // `(merchantId, marketplaceId) IN ((..),(..))` over the resolved stores.
-function storePairsClause(stores: ResolvedStore[], merchantCol: string, marketplaceCol: string): string {
+//
+// `merchantId` originates in the `amazon_store` table, so it is BOUND. `marketplaceId`
+// never is: `resolveStores` only ever emits `AmazonMarketplaceInfo.marketplaceId` values
+// from the static `amazonConstants` table, so it stays interpolated.
+function storePairsClause(
+	stores: ResolvedStore[],
+	merchantCol: string,
+	marketplaceCol: string,
+	params: SqlParams,
+): string {
 	const pairs = stores
-		.map((s) => `('${s.merchantId}', '${s.marketplaceId}')`)
+		.map((s) => `(${params.add(s.merchantId)}, '${s.marketplaceId}')`)
 		.join(", ");
 	return `(${merchantCol}, ${marketplaceCol}) IN (${pairs})`;
 }
@@ -516,6 +527,7 @@ function buildDimSql(
 	stores: ResolvedStore[],
 	tableAlias: "r",
 	isHaloIn: boolean,
+	params: SqlParams,
 ): DimSql {
 	const selectExprs: string[] = [];
 	const groupByExprs: string[] = [];
@@ -597,7 +609,9 @@ function buildDimSql(
 				outputCols.push("adGroupId");
 				break;
 			case "country": {
-				// Map marketplaceId -> country via CASE
+				// Map marketplaceId -> country via CASE. Both `marketplaceId` and
+				// `countryCode` come from the static `amazonConstants` marketplace table
+				// (never the DB, never caller text), so they stay interpolated.
 				const whenClauses = distinctMarketplaces(stores)
 					.map((s) => `WHEN ${tableAlias}."marketplaceId" = '${s.marketplaceId}' THEN '${s.countryCode}'`)
 					.join(" ");
@@ -607,7 +621,9 @@ function buildDimSql(
 				break;
 			}
 			case "store": {
-				// Storefront label per marketplace (e.g. Amazon.de)
+				// Storefront label per marketplace (e.g. Amazon.de). `storeName` here is
+				// built by `resolveStores` from the static marketplace `domainName`, NOT
+				// from `amazon_store."storeName"` — constants, so interpolation is safe.
 				const whenClauses = distinctMarketplaces(stores)
 					.map((s) => `WHEN ${tableAlias}."marketplaceId" = '${s.marketplaceId}' THEN '${s.storeName}'`)
 					.join(" ");
@@ -617,12 +633,13 @@ function buildDimSql(
 				break;
 			}
 			case "merchant": {
-				// Seller account: merchantId + its amazon_store name
+				// Seller account: merchantId + its amazon_store name. BOTH are read out of
+				// `amazon_store`, so both are bound rather than quote-escaped.
 				const whenClauses = distinctMerchants(stores)
 					.map((s) =>
-						`WHEN ${tableAlias}."merchantId" = '${s.merchantId}' THEN '${
-							s.merchantName.replace(/'/g, "''")
-						}'`
+						`WHEN ${tableAlias}."merchantId" = ${params.add(s.merchantId)} THEN ${
+							params.add(s.merchantName)
+						}::text`
 					)
 					.join(" ");
 				selectExprs.push(`${tableAlias}."merchantId" AS "merchantId"`);
@@ -654,6 +671,8 @@ function buildDimSql(
 // Currency mapping: always add currency to output
 // ---------------------------------------------------------------------------
 
+// `currency` and `marketplaceId` both come from the static `amazonConstants` marketplace
+// table, never from the DB or from caller text, so they stay interpolated.
 function currencyCaseExpr(stores: ResolvedStore[], alias: string): string {
 	const currencies = new Set(stores.map((s) => s.currency));
 	if (currencies.size <= 1) {
@@ -670,6 +689,12 @@ function currencyCaseExpr(stores: ResolvedStore[], alias: string): string {
 // Query 1: Advertised + Halo-out (search_asin_placement__byDay)
 // ---------------------------------------------------------------------------
 
+/** A built statement plus the values its `$n` placeholders bind to. */
+interface BuiltQuery {
+	readonly query: string;
+	readonly values: string[];
+}
+
 function buildQuery1(
 	stores: ResolvedStore[],
 	range: DateRange,
@@ -677,8 +702,11 @@ function buildQuery1(
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
-): string {
-	const dimSql = buildDimSql(dims, stores, "r", false);
+): BuiltQuery {
+	// One accumulator per statement. Placeholders are numbered by allocation order,
+	// which need not match their order in the finished text.
+	const params = createSqlParams();
+	const dimSql = buildDimSql(dims, stores, "r", false, params);
 	const productGrain = isProductGrain(dims);
 
 	// sb_asin_lookup CTE
@@ -689,7 +717,7 @@ function buildQuery1(
 				"creative"->'asins'->>0
 			) AS first_asin
 		FROM "amzadapi_exports_v1__ad"
-		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`)}
+		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, params)}
 			AND "adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO')
 	)`;
 
@@ -740,22 +768,26 @@ function buildQuery1(
 
 	// WHERE
 	const wheres: string[] = [
-		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`),
-		`r.date >= '${range.dateFirst}'`,
-		`r.date <= '${range.dateLast}'`,
+		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`, params),
+		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
+		`r.date >= ${params.add(range.dateFirst)}::date`,
+		`r.date <= ${params.add(range.dateLast)}::date`,
 		sbDoubleCountFilter("r", productGrain),
 	];
 	if (productAsins) {
-		wheres.push(`${resolvedAsinExpr()} IN (${productAsins.map((a) => `'${a}'`).join(",")})`);
+		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
+		// i.e. attacker-writable data — bind every one of them.
+		wheres.push(`${resolvedAsinExpr()} IN (${params.addList(productAsins)})`);
 	}
 	if (filter) {
+		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
 		if (dimSql.needsCampaignJoin) {
-			wheres.push(`camp.name = '${filter.value.replace(/'/g, "''")}'`);
+			wheres.push(`camp.name = ${params.add(filter.value)}`);
 		} else {
 			// Need to add campaign join for filter
 			fromClause +=
 				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
-			wheres.push(`camp_filt.name = '${filter.value.replace(/'/g, "''")}'`);
+			wheres.push(`camp_filt.name = ${params.add(filter.value)}`);
 		}
 	}
 
@@ -769,9 +801,12 @@ function buildQuery1(
 	// Deduplicate group by
 	const uniqueGroupBy = [...new Set(groupByCols)];
 
-	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
-		wheres.join("\n  AND ")
-	}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
+	return {
+		query: `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
+			wheres.join("\n  AND ")
+		}\nGROUP BY ${uniqueGroupBy.join(", ")}`,
+		values: params.values,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -785,10 +820,12 @@ function buildQuery2(
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
-): string {
+): BuiltQuery {
 	// For halo-in, the ASIN is convertedProductId (which product received the halo)
 	// We still need sb_asin_lookup for dimensions that depend on the advertised product
-	const dimSql = buildDimSql(dims, stores, "r", true);
+	// One accumulator per statement — this query's parameters are its own.
+	const params = createSqlParams();
+	const dimSql = buildDimSql(dims, stores, "r", true, params);
 	const productGrain = isProductGrain(dims);
 
 	const sbCte = `sb_asin_lookup AS (
@@ -798,7 +835,7 @@ function buildQuery2(
 				"creative"->'asins'->>0
 			) AS first_asin
 		FROM "amzadapi_exports_v1__ad"
-		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`)}
+		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, params)}
 			AND "adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO')
 	)`;
 
@@ -836,9 +873,10 @@ function buildQuery2(
 	}
 
 	const wheres: string[] = [
-		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`),
-		`r.date >= '${range.dateFirst}'`,
-		`r.date <= '${range.dateLast}'`,
+		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`, params),
+		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
+		`r.date >= ${params.add(range.dateFirst)}::date`,
+		`r.date <= ${params.add(range.dateLast)}::date`,
 		`r."productRelevance" = 'Brand halo'`,
 		// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
 		// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
@@ -847,15 +885,18 @@ function buildQuery2(
 		sbDoubleCountFilter("r", productGrain),
 	];
 	if (productAsins) {
-		wheres.push(`${resolvedAsinExprProduct01()} IN (${productAsins.map((a) => `'${a}'`).join(",")})`);
+		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
+		// i.e. attacker-writable data — bind every one of them.
+		wheres.push(`${resolvedAsinExprProduct01()} IN (${params.addList(productAsins)})`);
 	}
 	if (filter) {
+		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
 		if (dimSql.needsCampaignJoin) {
-			wheres.push(`camp.name = '${filter.value.replace(/'/g, "''")}'`);
+			wheres.push(`camp.name = ${params.add(filter.value)}`);
 		} else {
 			fromClause +=
 				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
-			wheres.push(`camp_filt.name = '${filter.value.replace(/'/g, "''")}'`);
+			wheres.push(`camp_filt.name = ${params.add(filter.value)}`);
 		}
 	}
 
@@ -866,9 +907,12 @@ function buildQuery2(
 
 	const uniqueGroupBy = [...new Set(groupByCols)];
 
-	return `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
-		wheres.join("\n  AND ")
-	}\nGROUP BY ${uniqueGroupBy.join(", ")}`;
+	return {
+		query: `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
+			wheres.join("\n  AND ")
+		}\nGROUP BY ${uniqueGroupBy.join(", ")}`,
+		values: params.values,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -890,7 +934,9 @@ function mergeResults(
 	// Build key columns: currency + timeUnit cols + dimension output cols
 	const keyCols = ["currency"];
 	if (timeUnit) keyCols.push(...TIME_UNIT_OUTPUT_COLS);
-	const dimSqlRef = buildDimSql(dims, [], "r", false);
+	// Only `outputCols` is wanted here; the SQL fragments (and any parameters this
+	// would allocate) are discarded, so the accumulator is a throwaway.
+	const dimSqlRef = buildDimSql(dims, [], "r", false, createSqlParams());
 	keyCols.push(...dimSqlRef.outputCols);
 
 	// Pre-aggregate: SQL groups by raw camp/ad/r columns, but the CASE
@@ -1116,26 +1162,32 @@ export async function loadAds(
 	}
 
 	// Get latest data date for the resolved stores
-	const latestRow = await sql.unsafe(`
+	const latestParams = createSqlParams();
+	const latestWhere = storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, latestParams);
+	const latestRow = await sql.unsafe<Array<{ latest: string | null }>>(
+		`
 		SELECT MAX(date)::text AS latest
 		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
-		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`)}
-	`) as Array<{ latest: string | null }>;
+		WHERE ${latestWhere}
+	`,
+		latestParams.values,
+	);
 	const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
 
-	// Build and run queries
+	// Build and run queries. Each carries its own bind values; a non-empty values array
+	// also puts these on the extended protocol, where stacked statements are rejected.
 	const q1Sql = buildQuery1(stores, range, groupByDims, timeUnit, productAsins, filter);
 	const q2Sql = buildQuery2(stores, range, groupByDims, timeUnit, productAsins, filter);
 
 	const [q1Rows, q2Rows] = await Promise.all([
-		sql.unsafe(q1Sql) as Promise<Record<string, unknown>[]>,
-		sql.unsafe(q2Sql) as Promise<Record<string, unknown>[]>,
+		sql.unsafe<Record<string, unknown>[]>(q1Sql.query, q1Sql.values),
+		sql.unsafe<Record<string, unknown>[]>(q2Sql.query, q2Sql.values),
 	]);
 
 	// Merge results
 	const data = mergeResults(
-		q1Rows as Record<string, unknown>[],
-		q2Rows as Record<string, unknown>[],
+		q1Rows,
+		q2Rows,
 		groupByDims,
 		timeUnit,
 		derived,

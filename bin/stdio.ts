@@ -12,7 +12,7 @@
 import "dotenv/config";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, loadSingleWorkspaceFeatures } from "../src/config.ts";
 import { createSqlProvider } from "../src/db.ts";
 import { registerTools } from "../src/registerTools.ts";
 
@@ -20,10 +20,13 @@ const config = loadConfig();
 const provider = createSqlProvider(config);
 
 const server = new Server(
-	{ name: "databrill-core-mcp", version: "0.1.0" },
+	{ name: "databrill-core-mcp", version: "0.2.0" },
 	{ capabilities: { tools: {} } },
 );
-registerTools(server, (args) => provider.getSqlForArgs(args), config);
+// One connection per workspace, so the tool's access kind changes nothing here.
+registerTools(server, (args, _access) => provider.getSqlForArgs(args), config, {
+	fixedFeatures: config === null ? loadSingleWorkspaceFeatures() : undefined,
+});
 
 await server.connect(new StdioServerTransport());
 

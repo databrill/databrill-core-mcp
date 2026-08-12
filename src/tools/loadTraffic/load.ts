@@ -15,6 +15,7 @@
 import postgres from "postgres";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { type DateRange, type ResolvedStore, resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
+import { createSqlParams, type SqlParams } from "../../sqlParams.ts";
 import {
 	type LoadTrafficParams,
 	type LoadTrafficResult,
@@ -29,15 +30,21 @@ function fail(msg: string): never {
 	throw new Error(msg);
 }
 
-/** `(merchantId, marketplaceId) IN ((..),(..))` over the distinct resolved store pairs. */
-function storePairsClause(stores: ResolvedStore[], alias: string): string {
+/**
+ * `(merchantId, marketplaceId) IN ((..),(..))` over the distinct resolved store pairs.
+ *
+ * `merchantId` originates in the `amazon_store` table, so it is BOUND. `marketplaceId`
+ * never is: `resolveStores` only ever emits `AmazonMarketplaceInfo.marketplaceId` values
+ * from the static `amazonConstants` table, so it stays interpolated.
+ */
+function storePairsClause(stores: ResolvedStore[], alias: string, params: SqlParams): string {
 	const seen = new Set<string>();
 	const pairs: string[] = [];
 	for (const s of stores) {
 		const k = `${s.merchantId}\t${s.marketplaceId}`;
 		if (seen.has(k)) continue;
 		seen.add(k);
-		pairs.push(`('${s.merchantId}', '${s.marketplaceId}')`);
+		pairs.push(`(${params.add(s.merchantId)}, '${s.marketplaceId}')`);
 	}
 	return `(${alias}."merchantId", ${alias}."marketplaceId") IN (${pairs.join(", ")})`;
 }
@@ -104,13 +111,20 @@ export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql):
 		from += `\nLEFT JOIN "brand_config_amazon_asin" fam ON fam.asin = r."childAsin"`;
 	}
 
+	// Every value below that came from the database or from `params` is bound, never
+	// interpolated. Column names, the enum-checked `timeUnit`/`groupBy` expressions and
+	// the marketplace ids stay in the query text — see `storePairsClause` and `SqlParams`.
+	const sqlParams = createSqlParams();
 	const wheres = [
-		storePairsClause(stores, "r"),
-		`r.date >= '${range.dateFirst}'`,
-		`r.date <= '${range.dateLast}'`,
+		storePairsClause(stores, "r", sqlParams),
+		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
+		`r.date >= ${sqlParams.add(range.dateFirst)}::date`,
+		`r.date <= ${sqlParams.add(range.dateLast)}::date`,
 	];
 	if (productAsins) {
-		wheres.push(`r."childAsin" IN (${productAsins.map((a) => `'${a}'`).join(",")})`);
+		// ASINs are read out of client tables (`brand_config_amazon_asin`, the catalog);
+		// they are attacker-writable data, so each one is a bind parameter.
+		wheres.push(`r."childAsin" IN (${sqlParams.addList(productAsins)})`);
 	}
 
 	const groupByCols = [`r."marketplaceId"`, bucket.groupBy, groupCol];
@@ -118,7 +132,9 @@ export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql):
 		groupByCols.join(", ")
 	}\nORDER BY ${bucket.groupBy}, ${groupCol}`;
 
-	const rows = await sql.unsafe(query) as Array<Record<string, unknown>>;
+	// Non-empty `values` puts this on the extended protocol, so stacked statements
+	// cannot execute here even if a fragment were ever spliced in unbound again.
+	const rows = await sql.unsafe<Array<Record<string, unknown>>>(query, sqlParams.values);
 
 	const data: TrafficRow[] = rows.map((r) => {
 		const sessions = Number(r["sessions"] ?? 0);

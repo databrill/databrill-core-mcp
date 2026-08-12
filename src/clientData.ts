@@ -7,7 +7,7 @@
  *   • identity comes from the **client DB** (`amazon_merchant` / `amazon_store`),
  *     not a `clients/{alias}/client.json` file;
  *   • the connection (`sql`) is injected, not opened here;
- *   • marketplace facts come from the vendored zero-import `amazonConstants`.
+ *   • marketplace facts come from the canonical `amazonConstants` module.
  *
  * Reads the target client DB: `amzreport_ALL_ORDERS` (net sales),
  * `amzadapi_reports_v1__search_asin_placement__byDay` (ads), and the
@@ -45,7 +45,7 @@ export async function discoverConfiguredCountries(sql: Sql): Promise<Set<string>
 
 // ─── store identity helpers (verbatim from _shared) ─────────────────
 
-/** Marketplace id → site code (uppercase, e.g. "US", "UK", "DE"). */
+/** Marketplace id → site code (uppercase, e.g. "US", "GB", "DE"). */
 function siteOf(marketplaceId: string): string | null {
 	return marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? null;
 }

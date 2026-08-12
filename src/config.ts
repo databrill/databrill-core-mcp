@@ -30,6 +30,24 @@ export interface WorkspaceDatabase {
 	readonly schema: string;
 }
 
+export const TFL_INVENTORY_FEATURE = "tflInventory";
+const TFL_INVENTORY_ENV = "DATABRILL_TFL_INVENTORY_ENABLED";
+
+/**
+ * The SQL tools carry TWO flags, not one. `sql` gates the read tools
+ * (`executeSql`, `listTables`, `describeTable`); `sqlWrite` gates `writeSql`
+ * alone. A hosted server announces the read tools in every session but the
+ * write tool only in a read-write one, which a single flag cannot express —
+ * and expressing it outside the feature mechanism would mean filtering tools
+ * by name, which is exactly what the declared access kind exists to avoid.
+ */
+export const SQL_FEATURE = "sql";
+const SQL_ENV = "DATABRILL_SQL_ENABLED";
+export const SQL_WRITE_FEATURE = "sqlWrite";
+const SQL_WRITE_ENV = "DATABRILL_SQL_WRITE_ENABLED";
+
+export type WorkspaceFeatures = Readonly<Record<string, boolean>>;
+
 export interface Merchant {
 	readonly name?: string;
 	readonly countries: readonly string[];
@@ -40,6 +58,7 @@ export interface Workspace {
 	readonly label?: string;
 	readonly database: WorkspaceDatabase;
 	readonly merchants: Readonly<Record<string, Merchant>>;
+	readonly features?: WorkspaceFeatures;
 }
 
 export interface Config {
@@ -58,6 +77,7 @@ export interface DirectoryWorkspace {
 	readonly wsid: string;
 	readonly label?: string;
 	readonly merchants?: Readonly<Record<string, Merchant>>;
+	readonly features?: WorkspaceFeatures;
 }
 
 /**
@@ -103,6 +123,40 @@ function expandEnv(raw: string): string {
 		);
 	}
 	return out;
+}
+
+function parseFeatures(raw: unknown, fail: (message: string) => never): WorkspaceFeatures {
+	if (raw === undefined) {
+		return {};
+	}
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+		fail('"features" must be an object of boolean flags');
+	}
+	const features: Record<string, boolean> = {};
+	for (const [name, enabled] of Object.entries(raw)) {
+		if (typeof enabled !== "boolean") {
+			fail(`feature "${name}" must be boolean`);
+		}
+		features[name] = enabled;
+	}
+	return features;
+}
+
+function envFlag(name: string): boolean {
+	return process.env[name]?.trim().toLowerCase() === "true";
+}
+
+/** Feature flags for single-POSTGRES_URL mode, where no workspace config exists. */
+export function loadSingleWorkspaceFeatures(): WorkspaceFeatures {
+	return {
+		[TFL_INVENTORY_FEATURE]: envFlag(TFL_INVENTORY_ENV),
+		[SQL_FEATURE]: envFlag(SQL_ENV),
+		[SQL_WRITE_FEATURE]: envFlag(SQL_WRITE_ENV),
+	};
+}
+
+export function workspaceHasFeature(workspace: DirectoryWorkspace, feature: string): boolean {
+	return workspace.features?.[feature] === true;
 }
 
 /**
@@ -203,6 +257,7 @@ function build(parsed: unknown, source: string): Config {
 			label: typeof ws["label"] === "string" ? ws["label"] : undefined,
 			database: { postgresUrl: postgresUrl as string, schema },
 			merchants,
+			features: parseFeatures(ws["features"], fail),
 		};
 	}
 

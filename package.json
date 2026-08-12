@@ -1,6 +1,6 @@
 {
 	"name": "@databrill/core-mcp",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"type": "module",
 	"description": "Databrill client-DB metric loaders + question tools, exposed as MCP tools and a CLI. Runs under bun and deno.",
 	"exports": {

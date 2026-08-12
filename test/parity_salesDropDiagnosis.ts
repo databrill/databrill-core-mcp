@@ -132,7 +132,7 @@ function diff(a: unknown, b: unknown, path: string, out: string[]): void {
 }
 
 // GB and UK are the same marketplace; the agency constants label it "UK", the
-// client DB / vendored constants label it "GB". Collapse for matching, and the
+// client DB / canonical constants label it "GB". Collapse for matching, and the
 // site/store label fields are excluded from the math comparison below.
 const siteKey = (s: string) => (s.toUpperCase() === "UK" ? "GB" : s.toUpperCase());
 const key = (d: StoreDiagnosis) => `${d.merchantId}-${siteKey(d.site)}`;

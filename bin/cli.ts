@@ -13,19 +13,34 @@ import { Command, Options } from "@effect/cli";
 import { NodeContext, NodeRuntime } from "@effect/platform-node";
 import { Effect, Option } from "effect";
 import type { Sql } from "postgres";
-import { loadConfig } from "../src/config.ts";
+import {
+	loadConfig,
+	loadSingleWorkspaceFeatures,
+	resolveWorkspace,
+	SQL_FEATURE,
+	SQL_WRITE_FEATURE,
+	TFL_INVENTORY_FEATURE,
+	workspaceHasFeature,
+} from "../src/config.ts";
 import { createSqlProvider } from "../src/db.ts";
+import { describeTable } from "../src/tools/describeTable/load.ts";
+import { executeSql } from "../src/tools/executeSql/execute.ts";
+import { listTables } from "../src/tools/listTables/load.ts";
+import { writeSql } from "../src/tools/writeSql/write.ts";
 import { loadAds } from "../src/tools/loadAds/loadAds.ts";
 import { loadTraffic } from "../src/tools/loadTraffic/load.ts";
 import { loadSqp } from "../src/tools/loadSqp/load.ts";
 import { loadRank } from "../src/tools/loadRank/load.ts";
 import { loadEconomics } from "../src/tools/loadEconomics/load.ts";
 import { loadInventoryPacing } from "../src/tools/inventoryPacing/load.ts";
+import { loadTflInventory } from "../src/tools/loadTflInventory/load.ts";
 import { load } from "../src/tools/salesDropDiagnosis/load.ts";
 import { render } from "../src/tools/salesDropDiagnosis/render.ts";
 import type { OutputFormat } from "../src/tools/salesDropDiagnosis/types.ts";
 
-const provider = createSqlProvider(loadConfig());
+const config = loadConfig();
+const singleWorkspaceFeatures = loadSingleWorkspaceFeatures();
+const provider = createSqlProvider(config);
 
 /** Shared `--wsid` option. Only meaningful with DATABRILL_CONFIG; ignored otherwise. */
 const wsidOption = Options.text("wsid").pipe(
@@ -41,6 +56,22 @@ function resolveSql(o: { wsid: Option.Option<string>; stores?: unknown }): Sql {
 		? Option.getOrUndefined(o.stores)
 		: undefined;
 	return provider.getSqlForArgs({ wsid: Option.getOrUndefined(o.wsid), stores });
+}
+
+function resolveFeatureSql(o: { wsid: Option.Option<string>; stores?: unknown }, feature: string): Sql {
+	const stores = typeof o.stores === "string"
+		? o.stores
+		: Option.isOption(o.stores)
+		? Option.getOrUndefined(o.stores)
+		: undefined;
+	const args = { wsid: Option.getOrUndefined(o.wsid), stores };
+	const enabled = config === null
+		? singleWorkspaceFeatures[feature] === true
+		: workspaceHasFeature(resolveWorkspace(config, args), feature);
+	if (!enabled) {
+		throw new Error(`This command requires the workspace feature "${feature}"`);
+	}
+	return provider.getSqlForArgs(args);
 }
 
 const loadAdsCommand = Command.make(
@@ -296,6 +327,122 @@ const inventoryPacingCommand = Command.make(
 		}),
 ).pipe(Command.withDescription("Recommend ad pacing from inventory runway: pause/throttle/hold/ramp per family"));
 
+const loadTflInventoryCommand = Command.make(
+	"loadTflInventory",
+	{
+		wsid: wsidOption,
+		products: Options.text("products").pipe(
+			Options.withDescription("Comma-separated exact product ids, product names, or SKUs"),
+			Options.optional,
+		),
+		warehouses: Options.text("warehouses").pipe(
+			Options.withDescription("Comma-separated exact warehouse ids or names"),
+			Options.optional,
+		),
+		asOf: Options.text("as-of").pipe(
+			Options.withDescription("Latest daily snapshot on or before YYYY-MM-DD"),
+			Options.optional,
+		),
+		maxAvailable: Options.float("max-available").pipe(Options.optional),
+		limit: Options.integer("limit").pipe(Options.optional),
+	},
+	(o) =>
+		Effect.gen(function* () {
+			const sql = resolveFeatureSql(o, TFL_INVENTORY_FEATURE);
+			try {
+				const result = yield* Effect.promise(() =>
+					loadTflInventory({
+						products: Option.getOrUndefined(o.products),
+						warehouses: Option.getOrUndefined(o.warehouses),
+						asOf: Option.getOrUndefined(o.asOf),
+						maxAvailable: Option.getOrUndefined(o.maxAvailable),
+						limit: Option.getOrUndefined(o.limit),
+					}, sql)
+				);
+				console.log(JSON.stringify(result, null, "\t"));
+			} finally {
+				yield* Effect.promise(() => provider.endAll());
+			}
+		}),
+).pipe(Command.withDescription("Fetch the latest The Fulfillment Lab product-by-warehouse inventory snapshot"));
+
+const listTablesCommand = Command.make(
+	"listTables",
+	{ wsid: wsidOption },
+	(o) =>
+		Effect.gen(function* () {
+			const sql = resolveFeatureSql(o, SQL_FEATURE);
+			try {
+				const result = yield* Effect.promise(() => listTables(sql));
+				console.log(JSON.stringify(result, null, "\t"));
+			} finally {
+				yield* Effect.promise(() => provider.endAll());
+			}
+		}),
+).pipe(Command.withDescription("List the tables and views in the workspace's own schema"));
+
+const describeTableCommand = Command.make(
+	"describeTable",
+	{
+		wsid: wsidOption,
+		table: Options.text("table").pipe(
+			Options.withDescription("Bare table name (no schema qualifier) in the workspace's own schema"),
+		),
+	},
+	(o) =>
+		Effect.gen(function* () {
+			const sql = resolveFeatureSql(o, SQL_FEATURE);
+			try {
+				const result = yield* Effect.promise(() => describeTable({ table: o.table }, sql));
+				console.log(JSON.stringify(result, null, "\t"));
+			} finally {
+				yield* Effect.promise(() => provider.endAll());
+			}
+		}),
+).pipe(Command.withDescription("Describe one table's columns, data types and nullability"));
+
+const executeSqlCommand = Command.make(
+	"executeSql",
+	{
+		wsid: wsidOption,
+		sql: Options.text("sql").pipe(Options.withDescription("Exactly one read-only SQL statement")),
+		limit: Options.integer("limit").pipe(
+			Options.withDescription("Maximum rows to return; a request above the maximum is rejected"),
+			Options.optional,
+		),
+	},
+	(o) =>
+		Effect.gen(function* () {
+			const client = resolveFeatureSql(o, SQL_FEATURE);
+			try {
+				const result = yield* Effect.promise(() =>
+					executeSql({ sql: o.sql, limit: Option.getOrUndefined(o.limit) }, client)
+				);
+				console.log(JSON.stringify(result, null, "\t"));
+			} finally {
+				yield* Effect.promise(() => provider.endAll());
+			}
+		}),
+).pipe(Command.withDescription("Run one read-only SQL statement in a read-only transaction with caps"));
+
+const writeSqlCommand = Command.make(
+	"writeSql",
+	{
+		wsid: wsidOption,
+		sql: Options.text("sql").pipe(Options.withDescription("Exactly one write statement")),
+	},
+	(o) =>
+		Effect.gen(function* () {
+			const client = resolveFeatureSql(o, SQL_WRITE_FEATURE);
+			try {
+				const result = yield* Effect.promise(() => writeSql({ sql: o.sql }, client));
+				console.log(JSON.stringify(result, null, "\t"));
+			} finally {
+				yield* Effect.promise(() => provider.endAll());
+			}
+		}),
+).pipe(Command.withDescription("Run one write statement; the database role's grants decide what it may touch"));
+
 const root = Command.make("core-mcp").pipe(
 	Command.withSubcommands([
 		loadAdsCommand,
@@ -303,12 +450,17 @@ const root = Command.make("core-mcp").pipe(
 		loadSqpCommand,
 		loadRankCommand,
 		loadEconomicsCommand,
+		loadTflInventoryCommand,
 		inventoryPacingCommand,
 		salesDropDiagnosis,
+		listTablesCommand,
+		describeTableCommand,
+		executeSqlCommand,
+		writeSqlCommand,
 	]),
 );
 
-const cli = Command.run(root, { name: "core-mcp", version: "0.1.0" });
+const cli = Command.run(root, { name: "core-mcp", version: "0.2.0" });
 
 cli(process.argv).pipe(
 	Effect.provide(NodeContext.layer),

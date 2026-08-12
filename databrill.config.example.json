@@ -3,6 +3,7 @@
 	"workspaces": {
 		"100000001": {
 			"label": "Example Workspace A",
+			"features": { "tflInventory": true, "sql": true, "sqlWrite": false },
 			"database": {
 				"postgresUrl": "${WORKSPACE_A_POSTGRES_URL}",
 				"schema": "w100000001"

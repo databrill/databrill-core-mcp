@@ -175,7 +175,49 @@ function makeInterval(
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
 const DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?$/;
-const DURATION_PATTERN = /^-?P/;
+
+/**
+ * One optional duration component, e.g. `31D`. UNSIGNED: a sign is legal only at
+ * the FRONT of the whole duration, where it sets the `negative` flag.
+ */
+function durationComponentPattern(symbol: string): string {
+	return `(?:\\d*[.,]?\\d+${symbol})?`;
+}
+
+/**
+ * The ISO 8601 duration shape, ANCHORED AT BOTH ENDS — the anchoring is the
+ * whole point, so do not relax it into a prefix test.
+ *
+ * `tinyduration` builds an equivalent pattern but applies it with `exec` and
+ * neither `^` nor `$`, and every component in it is optional, so a PREFIX match
+ * wins and the tail is discarded in silence: `"P31Days"` parsed as 31 days,
+ * `"P1D2D"` as one day, and `"P1Min"` as one MONTH — a ~30x error on a string a
+ * human writes meaning one minute, indistinguishable in the AST from a
+ * deliberate `"P1M"`. Its per-component pattern also carries its own `-?`,
+ * entirely separate from the leading `(?<negative>-)?`, so `"P-1D"` yielded
+ * `{days: -1}` with the `negative` flag ABSENT: a duration that points
+ * backwards while reporting itself as non-negative to every caller, all of which
+ * read the flag. Both are silent wrong answers rather than errors, which is why
+ * the shape is validated here and `tinyduration` is used only to pull the numbers
+ * out of a string already known to be well-formed.
+ *
+ * `T` requires at least one time component (the lookahead), which is what rejects
+ * a dangling `"P1DT"`. `"P"` and `"-P"` still MATCH this pattern, because every
+ * date component is optional; they are caught by `tinyduration`, which rejects a
+ * duration with no components at all.
+ */
+const DURATION_PATTERN = new RegExp(
+	"^-?P" +
+		durationComponentPattern("Y") +
+		durationComponentPattern("M") +
+		durationComponentPattern("W") +
+		durationComponentPattern("D") +
+		"(?:T(?=[.,\\d])" +
+		durationComponentPattern("H") +
+		durationComponentPattern("M") +
+		durationComponentPattern("S") +
+		")?$",
+);
 
 function tryParseDateTime(input: string): WhenAst_DateTime | null {
 	if (DATETIME_PATTERN.test(input)) {
