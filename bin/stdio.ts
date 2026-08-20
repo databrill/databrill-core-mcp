@@ -9,6 +9,7 @@
  * Pools are lazy (opened on first use) and closed on shutdown.
  */
 
+import "temporal-polyfill/global";
 import "dotenv/config";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

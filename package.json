@@ -23,9 +23,12 @@
 		"@modelcontextprotocol/sdk": "^1.0.0",
 		"dotenv": "^16.4.5",
 		"effect": "3.21.4",
+		"kysely": "^0.29.0",
 		"luxon": "^3.5.0",
 		"postgres": "^3.4.8",
-		"tinyduration": "^3.3.1"
+		"temporal-polyfill": "1.0.4",
+		"tinyduration": "^3.3.1",
+		"@jsr/databrill__core-pg-kysely": "^0.1.3"
 	},
 	"devDependencies": {
 		"@types/luxon": "^3.4.2"

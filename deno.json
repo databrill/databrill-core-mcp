@@ -1,12 +1,18 @@
 {
 	"nodeModulesDir": "auto",
+	"minimumDependencyAge": {
+		"age": "P1D",
+		"exclude": [
+			"npm:@jsr/databrill__core-pg-kysely"
+		]
+	},
 	"tasks": {
 		"fmt": "deno fmt",
 		"fmt:check": "deno fmt --check",
 		"lint": "deno lint",
-		"check": "deno check",
-		"static": "deno --quiet fmt && deno task check && deno task lint",
-		"static:ci": "deno --quiet task fmt:check && deno task check && deno task lint",
+		"check": "deno check --quiet",
+		"static": "deno --quiet fmt && deno --quiet task check && deno --quiet task lint",
+		"static:ci": "deno --quiet task fmt:check && deno --quiet task check && deno --quiet task lint",
 		"ci": "deno task static:ci"
 	},
 	"fmt": {

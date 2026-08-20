@@ -8,6 +8,7 @@
  * inferred from `--stores`), matching the MCP server's routing.
  */
 
+import "temporal-polyfill/global";
 import "dotenv/config";
 import { Command, Options } from "@effect/cli";
 import { NodeContext, NodeRuntime } from "@effect/platform-node";

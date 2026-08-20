@@ -9,6 +9,7 @@
  * it degrades to a single `POSTGRES_URL` pool — the original behaviour.
  */
 
+import { makePostgresJsTypes } from "@jsr/databrill__core-pg-kysely/canonical";
 import postgres, { type Sql } from "postgres";
 import { type Config, resolveWorkspace } from "./config.ts";
 
@@ -22,6 +23,7 @@ export function getSql(connectionString?: string, schema?: string): Sql {
 		max: 5,
 		idle_timeout: 30,
 		connect_timeout: 10,
+		types: makePostgresJsTypes(),
 		transform: { undefined: null },
 		...(schema ? { connection: { search_path: schema } } : {}),
 	});

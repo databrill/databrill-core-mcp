@@ -23,9 +23,13 @@ export interface ResolvedStore {
 }
 
 export interface DateRange {
-	dateFirst: string; // YYYY-MM-DD inclusive
-	dateLast: string; // YYYY-MM-DD inclusive
+	readonly dateFirst: string; // YYYY-MM-DD inclusive
+	readonly dateLast: string; // YYYY-MM-DD inclusive
 }
+
+export type ParsedWhenRange =
+	| { readonly kind: "explicit"; readonly range: DateRange }
+	| { readonly kind: "trailing"; readonly duration: WhenAst_Duration };
 
 export interface FilterExpr {
 	field: string;
@@ -310,10 +314,7 @@ function extractDate(node: { readonly _tag: string; readonly date?: string; read
 	throw new Error(`Cannot extract date from ${node._tag}`);
 }
 
-export async function resolveWhen(
-	whenStr: string,
-	sql: postgres.Sql,
-): Promise<DateRange> {
+export function parseWhenRange(whenStr: string): ParsedWhenRange {
 	const parsed = parseWhenAst(whenStr);
 	if (Either.isLeft(parsed)) {
 		fail(`Invalid --when: ${parsed.left.message}`);
@@ -322,41 +323,61 @@ export async function resolveWhen(
 
 	switch (ast._tag) {
 		case "Interval_DateDate":
-			return { dateFirst: ast.left.date, dateLast: ast.right.date };
+			return { kind: "explicit", range: { dateFirst: ast.left.date, dateLast: ast.right.date } };
 
 		case "Interval_DateTimeDatetime":
 			return {
-				dateFirst: ast.left.datetime.slice(0, 10),
-				dateLast: ast.right.datetime.slice(0, 10),
+				kind: "explicit",
+				range: {
+					dateFirst: ast.left.datetime.slice(0, 10),
+					dateLast: ast.right.datetime.slice(0, 10),
+				},
 			};
 
 		case "Interval_DateDuration": {
 			const from = extractDate(ast.left);
 			const to = addDurationDays(from, ast.right, 1);
-			return { dateFirst: from, dateLast: to };
+			return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
 		}
 
 		case "Interval_DurationDate": {
 			const to = extractDate(ast.right);
 			const from = addDurationDays(to, ast.left, -1);
-			return { dateFirst: from, dateLast: to };
+			return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
 		}
 
-		case "Duration": {
-			// Duration alone: end = latest data date
-			const latestRow = await sql`
-				SELECT MAX(date)::text AS latest
-				FROM "amzadapi_reports_v1__search_asin_placement__byDay"
-			`;
-			const latest = latestRow[0]?.["latest"];
-			if (!latest) fail("No ad data found in database");
-			const from = addDurationDays(latest, ast, -1);
-			return { dateFirst: from, dateLast: latest };
-		}
+		case "Duration":
+			return { kind: "trailing", duration: ast };
 
 		default:
 			fail(`Unsupported --when format: ${ast._tag}`);
 	}
+}
+
+/** Resolve a bare duration against a source-specific inclusive end date. */
+export function resolveTrailingRange(duration: WhenAst_Duration, dateLast: string): DateRange {
+	return { dateFirst: addDurationDays(dateLast, duration, -1), dateLast };
+}
+
+export async function resolveWhen(
+	whenStr: string,
+	sql: postgres.Sql,
+): Promise<DateRange> {
+	const request = parseWhenRange(whenStr);
+	if (request.kind === "explicit") {
+		return request.range;
+	}
+
+	// Duration alone: end = latest advertising data date. Source-specific
+	// consumers such as loadTraffic parse the same request and provide their own
+	// definitive end date instead of calling this advertising fallback.
+	const latestRow = await sql`
+		SELECT MAX(date)::text AS latest
+		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
+	`;
+	const latest = latestRow[0]?.["latest"];
+	if (!latest) fail("No ad data found in database");
+	return resolveTrailingRange(request.duration, latest);
 }
 
 // ---------------------------------------------------------------------------

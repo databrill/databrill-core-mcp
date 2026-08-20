@@ -44,7 +44,10 @@ export const loadSqpTool = {
 	name: "loadSqp",
 	description:
 		"Fetch Search Query Performance: our-vs-market impressions, clicks, and purchases per period (with share %), " +
-		"plus the top search queries by market impressions. Bucketed by the report's WEEK or MONTH timeUnit, across the " +
+		"plus the top search queries by market impressions. Each keyword row carries all six counts — market and ours " +
+		"for impressions, clicks and purchases — so a market CTR or CVR is an exact division of two of them; never " +
+		"invert a rounded share, and never use the report's totalClickRate/totalPurchaseRate columns, which are " +
+		"per-search rather than per-impression. Bucketed by the report's WEEK or MONTH timeUnit, across the " +
 		"requested marketplaces. Reads the client DB (amzreport_SEARCH_QUERY_PERFORMANCE).",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) => loadSqp(parseParams(args), sql),

@@ -1,21 +1,29 @@
 /**
- * loadTraffic — per-ASIN (or family) Sales & Traffic metrics over a window:
- * sessions, units, sales, and conversion rate, from `amzreport_SALES_AND_TRAFFIC__skuByDay`.
+ * loadTraffic — per-ASIN (or family) Sales & Traffic metrics over a window.
  *
- * Generalized from the original `queryFamilySessions`:
- *   • marketplace(s) come from store resolution, not a hardcoded US id;
- *   • the family/ASIN filter uses the generic `brand_config_amazon_asin` (via
- *     loadAds's `resolveProducts`), not a client-specific ASIN table;
- *   • the bucket is a configurable timeUnit (DAY/WEEK/MONTH), not week-only.
- *
- * Reuses loadAds's `resolveStores` / `resolveWhen` / `resolveProducts` so every
- * metric tool shares one store/when/product resolution surface.
+ * Store and product inputs continue to use loadAds's established resolution
+ * helpers. Metric queries are compiled by the canonical
+ * `AmazonReport_SALES_AND_TRAFFIC` reader, once per marketplace so its ASIN and
+ * FAMILY levels do not merge marketplace rows that this public result retains.
  */
 
-import postgres from "postgres";
-import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
-import { type DateRange, type ResolvedStore, resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
-import { createSqlParams, type SqlParams } from "../../sqlParams.ts";
+import {
+	type AmazonReportSalesAndTrafficResult,
+	type AmazonReportSalesAndTrafficRow,
+	type CanonicalLevel,
+	type CanonicalWindow,
+	createCanonicalQueryBuilder,
+	readAmazonReportSalesAndTraffic,
+} from "@jsr/databrill__core-pg-kysely/canonical";
+import type postgres from "postgres";
+import {
+	type DateRange,
+	parseWhenRange,
+	type ResolvedStore,
+	resolveProducts,
+	resolveStores,
+	resolveTrailingRange,
+} from "../loadAds/loadAds.ts";
 import {
 	type LoadTrafficParams,
 	type LoadTrafficResult,
@@ -26,66 +34,126 @@ import {
 	VALID_TRAFFIC_TIME_UNITS,
 } from "./types.ts";
 
+/** The only canonical measures exposed through loadTraffic's established result. */
+export const LOAD_TRAFFIC_CANONICAL_MEASURES = [
+	"sessions",
+	"unitsOrdered",
+	"orderedProductSales",
+	"unitSessionPercentage",
+] as const;
+
+interface MarketplaceGroup {
+	readonly marketplaceId: string;
+	readonly countryCode: string;
+	readonly stores: { readonly merchantId: string; readonly marketplaceId: string }[];
+	readonly merchantIds: Set<string>;
+}
+
 function fail(msg: string): never {
 	throw new Error(msg);
-}
-
-/**
- * `(merchantId, marketplaceId) IN ((..),(..))` over the distinct resolved store pairs.
- *
- * `merchantId` originates in the `amazon_store` table, so it is BOUND. `marketplaceId`
- * never is: `resolveStores` only ever emits `AmazonMarketplaceInfo.marketplaceId` values
- * from the static `amazonConstants` table, so it stays interpolated.
- */
-function storePairsClause(stores: ResolvedStore[], alias: string, params: SqlParams): string {
-	const seen = new Set<string>();
-	const pairs: string[] = [];
-	for (const s of stores) {
-		const k = `${s.merchantId}\t${s.marketplaceId}`;
-		if (seen.has(k)) continue;
-		seen.add(k);
-		pairs.push(`(${params.add(s.merchantId)}, '${s.marketplaceId}')`);
-	}
-	return `(${alias}."merchantId", ${alias}."marketplaceId") IN (${pairs.join(", ")})`;
-}
-
-/** Grouping + select label for the time bucket (column `date`). */
-function bucketExprs(tu: TrafficTimeUnit): { groupBy: string; label: string } {
-	switch (tu) {
-		case "DAY":
-			return { groupBy: `r.date`, label: `r.date::text` };
-		case "WEEK":
-			return {
-				groupBy: `date_trunc('week', r.date)`,
-				label: `(date_trunc('week', r.date)::date + 6)::text`,
-			};
-		case "MONTH":
-			return {
-				groupBy: `date_trunc('month', r.date)`,
-				label: `(date_trunc('month', r.date) + INTERVAL '1 month' - INTERVAL '1 day')::date::text`,
-			};
-	}
 }
 
 function round2(n: number): number {
 	return Math.round(n * 100) / 100;
 }
 
+function isTrafficGroupBy(value: string): value is TrafficGroupBy {
+	return VALID_TRAFFIC_GROUP_BY.some((candidate) => candidate === value);
+}
+
+function isTrafficTimeUnit(value: string): value is TrafficTimeUnit {
+	return VALID_TRAFFIC_TIME_UNITS.some((candidate) => candidate === value);
+}
+
+function parseTrafficGroupBy(value: string): TrafficGroupBy {
+	if (isTrafficGroupBy(value)) {
+		return value;
+	}
+	return fail(`Unknown groupBy '${value}'. Valid: ${VALID_TRAFFIC_GROUP_BY.join(", ")}`);
+}
+
+function parseTrafficTimeUnit(value: string): TrafficTimeUnit {
+	if (isTrafficTimeUnit(value)) {
+		return value;
+	}
+	return fail(`Unknown timeUnit '${value}'. Valid: ${VALID_TRAFFIC_TIME_UNITS.join(", ")}`);
+}
+
+function groupStoresByMarketplace(stores: readonly ResolvedStore[]): MarketplaceGroup[] {
+	const groups = new Map<string, MarketplaceGroup>();
+	for (const store of stores) {
+		let group = groups.get(store.marketplaceId);
+		if (group === undefined) {
+			group = {
+				marketplaceId: store.marketplaceId,
+				countryCode: store.countryCode,
+				stores: [],
+				merchantIds: new Set<string>(),
+			};
+			groups.set(store.marketplaceId, group);
+		}
+		if (!group.merchantIds.has(store.merchantId)) {
+			group.merchantIds.add(store.merchantId);
+			group.stores.push({ merchantId: store.merchantId, marketplaceId: store.marketplaceId });
+		}
+	}
+	return [...groups.values()];
+}
+
+function resultError(result: AmazonReportSalesAndTrafficResult): string {
+	const reasons = result.unavailable.map((entry) => entry.reason);
+	return reasons.length === 0 ? "No definitive Sales and Traffic date was found" : reasons.join(" ");
+}
+
+function numberMeasure(row: AmazonReportSalesAndTrafficRow, name: string): number {
+	return row.measures[name] ?? 0;
+}
+
+function mapTrafficRow(
+	row: AmazonReportSalesAndTrafficRow,
+	group: MarketplaceGroup,
+	groupBy: TrafficGroupBy,
+): TrafficRow {
+	const sessions = numberMeasure(row, "sessions");
+	const units = numberMeasure(row, "unitsOrdered");
+	const out: TrafficRow = {
+		country: group.countryCode,
+		marketplaceId: group.marketplaceId,
+		period: row.period,
+		sessions: round2(sessions),
+		units: round2(units),
+		sales: round2(numberMeasure(row, "orderedProductSales")),
+		cr: round2(numberMeasure(row, "unitSessionPercentage")),
+	};
+	if (groupBy === "family") {
+		out.family = row.key["family"] ?? "(unmapped)";
+	} else {
+		out.asin = row.key["asin"] ?? "";
+	}
+	return out;
+}
+
+function compareTrafficRows(left: TrafficRow, right: TrafficRow, groupBy: TrafficGroupBy): number {
+	const period = left.period.localeCompare(right.period);
+	if (period !== 0) {
+		return period;
+	}
+	const leftGroup = groupBy === "family" ? left.family ?? "" : left.asin ?? "";
+	const rightGroup = groupBy === "family" ? right.family ?? "" : right.asin ?? "";
+	const grouped = leftGroup.localeCompare(rightGroup);
+	return grouped !== 0 ? grouped : left.marketplaceId.localeCompare(right.marketplaceId);
+}
+
 export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Promise<LoadTrafficResult> {
 	if (!params.stores) fail("stores is required");
 	if (!params.when) fail("when is required");
 
-	const groupBy = (params.groupBy ?? "asin") as TrafficGroupBy;
-	if (!VALID_TRAFFIC_GROUP_BY.includes(groupBy)) {
-		fail(`Unknown groupBy '${params.groupBy}'. Valid: ${VALID_TRAFFIC_GROUP_BY.join(", ")}`);
-	}
-	const timeUnit = (params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK") as TrafficTimeUnit;
-	if (!VALID_TRAFFIC_TIME_UNITS.includes(timeUnit)) {
-		fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_TRAFFIC_TIME_UNITS.join(", ")}`);
-	}
+	const groupBy = parseTrafficGroupBy(params.groupBy ?? "asin");
+	const timeUnit = parseTrafficTimeUnit(params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK");
 
 	const stores = await resolveStores(params.stores, sql);
-	const range: DateRange = await resolveWhen(params.when, sql);
+	const marketplaceGroups = groupStoresByMarketplace(stores);
+	const when = parseWhenRange(params.when);
 
 	let productAsins: string[] | null = null;
 	if (params.products) {
@@ -93,72 +161,80 @@ export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql):
 		if (productAsins.length === 0) fail("products resolved to zero ASINs");
 	}
 
-	const bucket = bucketExprs(timeUnit);
-	const groupCol = groupBy === "family" ? `COALESCE(fam.family, '(unmapped)')` : `r."childAsin"`;
-	const groupAlias = groupBy === "family" ? "family" : "asin";
-
-	const selectCols = [
-		`r."marketplaceId" AS "marketplaceId"`,
-		`${bucket.label} AS "period"`,
-		`${groupCol} AS "${groupAlias}"`,
-		`SUM(CAST(r.traffic->>'sessions' AS int)) AS "sessions"`,
-		`SUM(CAST(r.sales->>'unitsOrdered' AS int)) AS "units"`,
-		`SUM(CAST(r.sales->'orderedProductSales'->>'amount' AS numeric)) AS "sales"`,
-	];
-
-	let from = `FROM "amzreport_SALES_AND_TRAFFIC__skuByDay" r`;
-	if (groupBy === "family") {
-		from += `\nLEFT JOIN "brand_config_amazon_asin" fam ON fam.asin = r."childAsin"`;
+	const db = createCanonicalQueryBuilder();
+	const level: CanonicalLevel = groupBy === "family" ? "FAMILY" : "ASIN";
+	function readGroup(
+		group: MarketplaceGroup,
+		window: CanonicalWindow,
+		measures: readonly string[],
+	): Promise<AmazonReportSalesAndTrafficResult> {
+		return readAmazonReportSalesAndTraffic(db, sql, {
+			level,
+			timeGranularity: timeUnit,
+			window,
+			stores: group.stores,
+			asins: productAsins ?? undefined,
+			measures,
+		});
 	}
 
-	// Every value below that came from the database or from `params` is bound, never
-	// interpolated. Column names, the enum-checked `timeUnit`/`groupBy` expressions and
-	// the marketplace ids stay in the query text — see `storePairsClause` and `SqlParams`.
-	const sqlParams = createSqlParams();
-	const wheres = [
-		storePairsClause(stores, "r", sqlParams),
-		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
-		`r.date >= ${sqlParams.add(range.dateFirst)}::date`,
-		`r.date <= ${sqlParams.add(range.dateLast)}::date`,
-	];
-	if (productAsins) {
-		// ASINs are read out of client tables (`brand_config_amazon_asin`, the catalog);
-		// they are attacker-writable data, so each one is a bind parameter.
-		wheres.push(`r."childAsin" IN (${sqlParams.addList(productAsins)})`);
+	let range: DateRange;
+	if (when.kind === "explicit") {
+		range = when.range;
+	} else {
+		const probes = await Promise.all(
+			marketplaceGroups.map((group) => readGroup(group, { kind: "trailingDays", days: 1 }, ["sessions"])),
+		);
+		let earliestDate: string | null = null;
+		for (let index = 0; index < probes.length; index++) {
+			const probe = probes[index];
+			const group = marketplaceGroups[index];
+			if (probe === undefined || group === undefined) {
+				fail("Internal loadTraffic marketplace probe mismatch");
+			}
+			if (probe.window === null) {
+				fail(`${group.countryCode}: ${resultError(probe)}`);
+			}
+			if (earliestDate === null || probe.window.dateLast < earliestDate) {
+				earliestDate = probe.window.dateLast;
+			}
+		}
+		if (earliestDate === null) {
+			fail("No Sales and Traffic marketplaces were resolved");
+		}
+		range = resolveTrailingRange(when.duration, earliestDate);
 	}
 
-	const groupByCols = [`r."marketplaceId"`, bucket.groupBy, groupCol];
-	const query = `SELECT\n  ${selectCols.join(",\n  ")}\n${from}\nWHERE ${wheres.join("\n  AND ")}\nGROUP BY ${
-		groupByCols.join(", ")
-	}\nORDER BY ${bucket.groupBy}, ${groupCol}`;
-
-	// Non-empty `values` puts this on the extended protocol, so stacked statements
-	// cannot execute here even if a fragment were ever spliced in unbound again.
-	const rows = await sql.unsafe<Array<Record<string, unknown>>>(query, sqlParams.values);
-
-	const data: TrafficRow[] = rows.map((r) => {
-		const sessions = Number(r["sessions"] ?? 0);
-		const units = Number(r["units"] ?? 0);
-		const marketplaceId = String(r["marketplaceId"]);
-		const out: TrafficRow = {
-			country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
-			marketplaceId,
-			period: String(r["period"]),
-			sessions,
-			units,
-			sales: round2(Number(r["sales"] ?? 0)),
-			cr: sessions > 0 ? round2((units / sessions) * 100) : 0,
-		};
-		if (groupBy === "family") out.family = String(r["family"] ?? "(unmapped)");
-		else out.asin = String(r["asin"] ?? "");
-		return out;
-	});
+	const canonicalResults = await Promise.all(
+		marketplaceGroups.map((group) =>
+			readGroup(
+				group,
+				{ kind: "explicit", dateFirst: range.dateFirst, dateLast: range.dateLast },
+				LOAD_TRAFFIC_CANONICAL_MEASURES,
+			)
+		),
+	);
+	const data: TrafficRow[] = [];
+	for (let index = 0; index < canonicalResults.length; index++) {
+		const result = canonicalResults[index];
+		const group = marketplaceGroups[index];
+		if (result === undefined || group === undefined) {
+			fail("Internal loadTraffic marketplace result mismatch");
+		}
+		if (when.kind === "trailing" && result.window === null) {
+			fail(`${group.countryCode}: ${resultError(result)}`);
+		}
+		for (const row of result.rows) {
+			data.push(mapTrafficRow(row, group, groupBy));
+		}
+	}
+	data.sort((left, right) => compareTrafficRows(left, right, groupBy));
 
 	return {
 		meta: {
 			dateFirst: range.dateFirst,
 			dateLast: range.dateLast,
-			stores: [...new Set(stores.map((s) => s.countryCode))],
+			stores: [...new Set(stores.map((store) => store.countryCode))],
 			rowCount: data.length,
 			groupBy,
 			timeUnit,
