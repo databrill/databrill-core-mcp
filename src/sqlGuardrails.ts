@@ -65,6 +65,11 @@ interface SqlErrorInfo {
 }
 
 interface ReadExecution {
+	/**
+	 * The Postgres command tag (`SELECT`, `EXPLAIN`, `SHOW`, …), or `null` when the
+	 * read stopped early at a cap and the tag was therefore never received.
+	 */
+	readonly command: string | null;
 	readonly rows: readonly SqlRow[];
 	readonly truncatedBy: TruncationCap | null;
 }
@@ -189,13 +194,32 @@ export function createRowAccumulator(budget: RowBudget): RowAccumulator {
 	};
 }
 
-/** The notice that tells an agent "there is more" and WHICH cap stopped the read. */
-export function truncationNotice(truncatedBy: TruncationCap | null, budget: RowBudget): string | null {
+/**
+ * The notice that tells an agent "there is more" and WHICH cap stopped the read.
+ *
+ * `keptRowCount` is how many rows survived the caps. It only changes the byte-cap
+ * wording, and only in the zero-rows case: "return fewer rows" is not a remedy
+ * the caller can act on when not even the FIRST row fit.
+ */
+export function truncationNotice(
+	truncatedBy: TruncationCap | null,
+	budget: RowBudget,
+	keptRowCount: number,
+): string | null {
 	if (truncatedBy === "rows") {
 		return `Truncated at the ${budget.rowLimit}-row cap: more rows match. ` +
 			`Narrow the query, aggregate, or raise limit (maximum ${MAX_ROW_LIMIT}).`;
 	}
 	if (truncatedBy === "bytes") {
+		if (keptRowCount === 0) {
+			// Zero rows fit, so the first row ALONE is over the cap. The reachable
+			// instance is `EXPLAIN (FORMAT JSON)`, whose entire plan is one row —
+			// for which the generic "select fewer or narrower columns" advice below
+			// names nothing the caller can actually do.
+			return `The first row alone exceeded the ${budget.byteLimit}-byte serialized-JSON cap, ` +
+				"so no rows are returned. Project fewer or narrower columns from that one row, or — " +
+				"for a query plan — use EXPLAIN without FORMAT JSON, which returns one row per plan line.";
+		}
 		return `Truncated at the ${budget.byteLimit}-byte serialized-JSON cap before the ` +
 			`${budget.rowLimit}-row cap: more rows match. Select fewer or narrower columns.`;
 	}
@@ -318,6 +342,43 @@ export async function withReadTransaction<T>(
 }
 
 /**
+ * The rows the driver parsed but never handed to the cursor callback, if any.
+ *
+ * `final` is `unknown` on purpose. postgres.js types a resolved cursor as
+ * `ExecutionResult<T> = [] & ResultQueryMeta<…>`
+ * (`node_modules/postgres/types/index.d.ts:597`) — an EMPTY TUPLE intersected
+ * with metadata — while at runtime it is a `Result`, which extends `Array` and
+ * holds rows (`node_modules/postgres/src/result.js:1-11`). Indexing the published
+ * type is an error, so this narrows through `unknown` with `Array.isArray`
+ * instead of asserting.
+ *
+ * The identity check against `delivered` is the whole point of the helper: when
+ * the command tag carries a row count, the driver hands the callback the very
+ * object it then resolves with, so returning those rows again would DOUBLE-COUNT
+ * the last chunk of every ordinary `SELECT`. The discriminator is object
+ * identity, never `count`.
+ */
+export function residualRows(final: unknown, delivered: readonly SqlRow[] | null): readonly SqlRow[] {
+	if (!Array.isArray(final) || final === delivered) {
+		return [];
+	}
+	return final.filter((row): row is SqlRow => typeof row === "object" && row !== null);
+}
+
+/**
+ * The Postgres command tag off a resolved cursor, or `null` when there is none.
+ *
+ * Read through `fieldOf` rather than the declared `command: string`, because the
+ * type overstates it: an early stop resolves from `CloseComplete`
+ * (`node_modules/postgres/src/connection.js:852-855`) before `CommandComplete`
+ * has set the tag, so the tag really can be absent.
+ */
+function commandTag(final: unknown): string | null {
+	const command = fieldOf(final, "command");
+	return typeof command === "string" && command !== "" ? command : null;
+}
+
+/**
  * Execute ONE caller statement inside a READ ONLY transaction with the timeout
  * set, streaming through a cursor and stopping the moment a cap trips.
  *
@@ -333,12 +394,53 @@ export function runReadStatement(
 ): Promise<ReadExecution> {
 	return withReadTransaction(sql, hooks, async (tx) => {
 		const accumulator = createRowAccumulator(budget);
-		for await (const chunk of tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS)) {
-			if (!accumulator.add(chunk)) {
-				break;
+		let delivered: readonly SqlRow[] | null = null;
+		let stopped = false;
+		// The CALLBACK form of `.cursor`, deliberately, and three things depend on it.
+		//
+		// NOT the async-iterator form: it replaces the query's own resolver with one
+		// that throws its argument away (`node_modules/postgres/src/query.js:99`), and
+		// that argument is the `Result` holding the final partial chunk. Rows that
+		// crossed the wire and were parsed were then discarded inside the driver.
+		//
+		// NOT `.forEach`, which looks like the simpler fix and is not: `Query.forEach`
+		// (`node_modules/postgres/src/query.js:123-127`) does NOT set
+		// `options.simple = false` the way `.cursor` does at :75. With a bare
+		// `sql.unsafe(text)` that puts the statement back on the SIMPLE query protocol
+		// and reopens the stacked-statement execution this module exists to close (see
+		// the module header). It also has no way to stop early, so both caps would only
+		// apply after the whole result set had crossed the wire.
+		const final = await tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
+			delivered = chunk;
+			if (accumulator.add(chunk)) {
+				return undefined;
 			}
+			stopped = true;
+			// `sql.CLOSE` is the driver's documented stop sentinel
+			// (`node_modules/postgres/src/index.js:73`). Returning it takes the same
+			// `Close(portal)` path the async iterator's `return()` used, so stopping at
+			// a cap is unchanged in timing and in chunk granularity.
+			return sql.CLOSE;
+		});
+		// postgres.js hands the LAST partial chunk to the cursor callback only when the
+		// command tag carries a row count (`connection.js:611-614`, `result.count &&
+		// query.cursorFn(result)`). Postgres appends a count to `SELECT`, `INSERT`,
+		// `UPDATE`, `DELETE`, `MERGE`, `MOVE`, `FETCH` and `COPY` and to nothing else,
+		// so utility statements — `EXPLAIN`, `SHOW` — lost their trailing rows entirely
+		// while the result still claimed to be complete.
+		//
+		// `stopped` is load-bearing, not defensive: `CloseComplete`
+		// (`connection.js:852-855`) also resolves with a row-bearing `Result`, so
+		// appending after an early stop could carry the result PAST the cap that
+		// stopped it.
+		//
+		// The residual goes through `accumulator.add` like every other chunk and never
+		// straight onto the rows array, so both caps — and any whole-payload accounting
+		// the accumulator grows later — apply to it exactly as they do to the rest.
+		if (!stopped) {
+			accumulator.add(residualRows(final, delivered));
 		}
-		return { rows: accumulator.rows(), truncatedBy: accumulator.truncatedBy() };
+		return { command: commandTag(final), rows: accumulator.rows(), truncatedBy: accumulator.truncatedBy() };
 	});
 }
 
@@ -363,11 +465,32 @@ export async function runWriteStatement(
 			await assertIdentity(tx, hooks);
 			await executeUnit(tx, statementTimeoutStatement());
 			const rows: SqlRow[] = [];
+			let delivered: readonly SqlRow[] | null = null;
 			const result = await tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
+				delivered = chunk;
 				rows.push(...chunk);
 			});
+			// The identical lost-last-chunk defect and the identical double-count hazard
+			// as the read path: see `runReadStatement` for the mechanism, for why the
+			// discriminator is object identity rather than `count`, and for why
+			// `.forEach` is not the simpler fix. There is no cap on this path, so the
+			// callback never returns `sql.CLOSE` and no `stopped` guard is needed — but
+			// the residual still goes onto `rows` through the same push the chunks take,
+			// never by a second route.
+			rows.push(...residualRows(result, delivered));
 			return {
 				command: result.command,
+				// LAST-CHUNK-ONLY, so an UNDERCOUNT for any statement whose rows spanned
+				// more than one cursor chunk: a 100-row `INSERT … RETURNING` reports 0 and
+				// a 101-row one reports 1 (measured, not theorised). When a portal is
+				// resumed, Postgres's `CommandComplete` tag counts only the rows the LAST
+				// `Execute` retrieved, and postgres.js discards each earlier `Result`
+				// (`connection.js:845`, `result = new Result()` after every
+				// `PortalSuspended`), so `result.count` is the size of the final partial
+				// chunk rather than the statement's total. Deliberately NOT repaired here:
+				// choosing between the tag's count and `rows.length` changes what the
+				// receipt MEANS for a `RETURNING` statement, and this change is only about
+				// not dropping rows. `meta.returnedRowCount` is trustworthy in the meantime.
 				rowsAffected: Number.isInteger(result.count) ? result.count : null,
 				rows,
 			};

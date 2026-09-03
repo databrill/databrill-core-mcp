@@ -1,5 +1,6 @@
 import type { Sql } from "postgres";
 import { SQL_FEATURE } from "../../config.ts";
+import { SUPPORTED_TABLE_NAME_RULE } from "../../tableNames.ts";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import { describeTable } from "./load.ts";
 import type { DescribeTableParams } from "./types.ts";
@@ -11,7 +12,9 @@ const inputSchema = {
 	properties: {
 		table: {
 			type: "string",
-			description: "Bare table name, exactly as listTables reports it (case-sensitive, no schema qualifier).",
+			description: "Bare table name, byte-for-byte as listTables reports it (case-sensitive). Bare means there " +
+				"is no schema argument — do not add a schema qualifier and do not quote the name yourself. " +
+				`The name is used exactly as given, never trimmed or rewritten. ${SUPPORTED_TABLE_NAME_RULE}`,
 		},
 	},
 	required: ["table"],
@@ -28,7 +31,9 @@ export const describeTableTool = {
 	access: "read" as const,
 	description: "Describe one table in this workspace's own schema: column names, data types, nullability and " +
 		"defaults, in ordinal order. Takes a bare table name — there is no schema argument, so it can " +
-		"only describe the caller's own schema. Use listTables to find the name.",
+		"only describe the caller's own schema. Use listTables to find the name and pass it back " +
+		"unchanged; every name listTables reports is accepted here. " +
+		`A name outside the supported domain is refused rather than reported missing. ${SUPPORTED_TABLE_NAME_RULE}`,
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) =>
 		describeTable(parseParams(args), sql, hooks),

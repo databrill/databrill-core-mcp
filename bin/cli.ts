@@ -461,7 +461,7 @@ const root = Command.make("core-mcp").pipe(
 	]),
 );
 
-const cli = Command.run(root, { name: "core-mcp", version: "0.2.0" });
+const cli = Command.run(root, { name: "core-mcp", version: "0.2.1" });
 
 cli(process.argv).pipe(
 	Effect.provide(NodeContext.layer),

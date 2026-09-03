@@ -1,8 +1,15 @@
-import * as Schema from "effect/Schema";
+/**
+ * The Amazon regions this platform recognizes. This tuple is the single source of truth for the
+ * three codes: `AmazonRegion` below derives from it, and `amazonConstantsEffect.ts` builds
+ * `AmazonRegionSchema` from the same tuple, so the union and the schema cannot drift apart.
+ *
+ * The schema lives in that sibling file rather than here because this file must keep zero import
+ * statements: it is symlinked into `mcp-local/` and is meant to be symlinked into further packages
+ * that add no dependencies of their own, so it must not pull `effect` in behind it.
+ */
+export const AMAZON_REGIONS = ["EU", "FE", "NA"] as const;
 
-export const AmazonRegionSchema = Schema.Literal("EU", "FE", "NA");
-
-export type AmazonRegion = Schema.Schema.Type<typeof AmazonRegionSchema>;
+export type AmazonRegion = typeof AMAZON_REGIONS[number];
 
 export interface AmazonRegionInfo {
 	readonly baseUrlAdApi: string;

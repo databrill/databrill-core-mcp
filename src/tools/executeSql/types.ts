@@ -7,6 +7,13 @@ export interface ExecuteSqlParams {
 
 export interface ExecuteSqlResult {
 	readonly meta: {
+		/**
+		 * The Postgres command tag (`SELECT`, `EXPLAIN`, `SHOW`, …), or `null` when
+		 * the read stopped early at a cap and the tag was never received. It is what
+		 * makes "this was a utility statement" visible to the caller without counting
+		 * rows against a catalog.
+		 */
+		readonly command: string | null;
 		readonly rowCount: number;
 		/** The effective row cap for this call (the request's, or the default). */
 		readonly limit: number;

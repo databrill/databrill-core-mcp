@@ -1,11 +1,25 @@
 /**
  * `describeTable` — one table's columns, with data types and nullability.
  *
- * Takes a BARE table name and has no schema parameter, so it cannot be pointed
- * at another schema. What enforces that is the `table_schema = ANY(current_schemas(false))`
- * predicate — the same scoping idiom as `loadTflInventory/load.ts:129` and
- * `loadRank/load.ts:34` — not the name check below, which exists only so a
- * qualified name gets an actionable message instead of a silent "not found".
+ * Takes a BARE table name — meaning there is no schema argument to point at another
+ * schema, NOT that the caller should add quoting of their own. What confines the
+ * lookup is the `table_schema = ANY(current_schemas(false))` predicate — the same
+ * scoping idiom as `loadTflInventory/load.ts:129` and `loadRank/load.ts:34` — plus
+ * the fact that the name travels as a bind parameter. The name check below is not
+ * part of that and never was.
+ *
+ * What the check IS for: it holds this tool to the same domain of table names that
+ * `listTables` draws its listing from, defined once in `../../tableNames.ts`. Every
+ * name that tool lists is accepted here byte for byte. The reverse does not hold and
+ * never needed to: `listTables` also hides migration bookkeeping, which this tool
+ * still describes. A name outside the domain is refused with a message that names it
+ * — which is also what still gives a schema-qualified name an actionable answer
+ * instead of a silent "not found".
+ *
+ * The caller's literal string is what gets queried and what `meta.table` echoes back.
+ * It is deliberately not trimmed: reformatting a name before looking it up would
+ * describe a table the caller did not name, and would leave the domain's
+ * no-edge-whitespace clause unable to fire here at all.
  *
  * See `../executeSql/execute.ts` for why the `mcp-local/CLAUDE.md`
  * feature-origination rule does not apply to this tool family.
@@ -14,6 +28,7 @@
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import { withReadTransaction } from "../../sqlGuardrails.ts";
+import { isSupportedTableName, SUPPORTED_TABLE_NAME_RULE } from "../../tableNames.ts";
 import type { DescribeTableParams, DescribeTableResult, TableColumn } from "./types.ts";
 
 interface DbColumnRow {
@@ -30,14 +45,15 @@ function fail(message: string): never {
 }
 
 function parseTable(value: string | undefined): string {
-	const table = value?.trim() ?? "";
+	const table = value ?? "";
 	if (table === "") {
 		fail("table is required and must be a bare table name");
 	}
-	if (/[."]/.test(table)) {
+	if (!isSupportedTableName(table)) {
 		fail(
-			`table must be a bare table name with no schema qualifier or quoting; got "${table}". ` +
-				"Only this workspace's own schema can be described.",
+			`table is not a name this MCP supports; got "${table}". ${SUPPORTED_TABLE_NAME_RULE} ` +
+				"Pass the name exactly as listTables reports it — no schema qualifier, no quoting of your own. " +
+				"This is not a report that the table is missing.",
 		);
 	}
 	return table;

@@ -40,9 +40,12 @@ export const executeSqlTool = {
 	feature: SQL_FEATURE,
 	access: "read" as const,
 	description: "Run one read-only SQL statement against this workspace's own database and return the rows. " +
-		"Use listTables and describeTable first to discover the schema. Runs in a READ ONLY transaction " +
+		"Use listTables and describeTable first to discover the schema. EXPLAIN is supported and returns " +
+		"the plan as rows (one row per plan line, or a single parsed row with FORMAT JSON), as are SHOW " +
+		"and other statements that return rows without modifying data. Runs in a READ ONLY transaction " +
 		`with a ${STATEMENT_TIMEOUT_MS}ms statement timeout; results are capped by row count and by ` +
-		"serialized size, and the result says explicitly when and why it was truncated.",
+		"serialized size, and the result says explicitly when and why it was truncated. meta.command " +
+		"reports the Postgres command tag of the statement that ran.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => executeSql(parseParams(args), sql, hooks),
 };

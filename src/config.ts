@@ -19,6 +19,26 @@
  *       }
  *     }
  *   }
+ *
+ * This file is canonical HERE and symlinked into `mcp-local/src/config.ts` and
+ * `client-kit/src/lib/config.ts`. It was authored in `mcp-local/` and moved when
+ * `client-kit/` needed the same parser, because the invariant worth having is
+ * that a wsid resolves to the same database in both — one file, not two that
+ * agree today. Edit this one; there is no copy step. The symlinks are pinned by
+ * `services/tests/unit/mcpSharedSourceSymlinks.test.ts` and
+ * `client-kit/tests/unit/packageSymlinks.test.ts`.
+ *
+ * Consequences, both enforced by those packages' boundary scans, which read
+ * THROUGH the symlinks:
+ *
+ *   - It must import nothing beyond `node:` builtins and its sibling
+ *     `./amazonConstants.ts`. A `@databrill/*` or third-party import here
+ *     becomes a line every consumer of those packages must carry, and
+ *     `client-kit` is consumed as a git submodule whose files resolve against
+ *     the CONSUMER's import map.
+ *   - It has to live in this directory specifically, beside
+ *     `amazonConstants.ts`, because it reaches it relatively. Moving either one
+ *     alone breaks the canonical copy, not just the links.
  */
 
 import { readFileSync } from "node:fs";

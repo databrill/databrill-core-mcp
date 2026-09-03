@@ -42,13 +42,14 @@ export async function executeSql(
 	const execution = await runReadStatement(sql, statement, budget, hooks);
 	return {
 		meta: {
+			command: execution.command,
 			rowCount: execution.rows.length,
 			limit: budget.rowLimit,
 			byteLimit: budget.byteLimit,
 			statementTimeoutMs: STATEMENT_TIMEOUT_MS,
 			isTruncated: execution.truncatedBy !== null,
 			truncatedBy: execution.truncatedBy,
-			notice: truncationNotice(execution.truncatedBy, budget),
+			notice: truncationNotice(execution.truncatedBy, budget, execution.rows.length),
 		},
 		data: execution.rows,
 	};
