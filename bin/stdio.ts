@@ -21,7 +21,7 @@ const config = loadConfig();
 const provider = createSqlProvider(config);
 
 const server = new Server(
-	{ name: "databrill-core-mcp", version: "0.2.1" },
+	{ name: "databrill-core-mcp", version: "0.2.2" },
 	{ capabilities: { tools: {} } },
 );
 // One connection per workspace, so the tool's access kind changes nothing here.
