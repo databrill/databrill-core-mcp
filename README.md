@@ -12,12 +12,11 @@ Runs under **bun** and **deno** (same files, one `package.json`/`node_modules`).
 src/
   contract.ts              # tool registry (the contract — single source of truth)
   registerTools.ts         # registerTools(server, getSql) — mounts tools on an MCP Server
-  db.ts                    # getSql(POSTGRES_URL)
+  db.ts                    # registry-selected pools + role-binding assertion
   clientData.ts            # client-DB data layer (portable descendant of digest _shared)
-  config.ts                # optional multi-workspace config (DATABRILL_CONFIG) + routing
+  config.ts                # workspace registry (DATABRILL_CONFIG) + explicit routing
   amazonConstants.ts       # marketplace facts (mirrored from the monorepo's canonical module)
   sqlGuardrails.ts         # execution guards shared by the four SQL tools
-  sqlParams.ts             # bind-parameter accumulator for the concatenating loaders
   tools/load*/             # ads, traffic, SQP, rank, economics, and TFL inventory
   tools/inventoryPacing/   # Amazon inventory-to-ad action
   tools/salesDropDiagnosis/ {types,load,render,contract}.ts
@@ -38,12 +37,12 @@ third frontend, not a fork.
 
 ```bash
 bun install                       # or: deno install
-cp .env.example .env              # set POSTGRES_URL to the client's target DB
+cp .env.example .env              # set DATABRILL_CONFIG and its per-workspace URLs
 
 # CLI
-bun run bin/cli.ts salesDropDiagnosis --all-stores --format json
-deno run -A bin/cli.ts salesDropDiagnosis --stores DE,US
-deno run -A bin/cli.ts loadTflInventory --max-available 20
+bun run bin/cli.ts salesDropDiagnosis --wsid 100000001 --all-stores --format json
+deno run -A bin/cli.ts salesDropDiagnosis --wsid 100000001 --stores DE,US
+deno run -A bin/cli.ts loadTflInventory --wsid 100000001 --max-available 20
 
 # MCP stdio server
 bun run bin/stdio.ts
@@ -55,13 +54,13 @@ MCP client config (Desktop / dev):
 { "mcpServers": { "databrill-core": { "command": "bun", "args": ["run", "bin/stdio.ts"] } } }
 ```
 
-## Multiple workspaces
+## Workspace registry
 
-By default the server serves one client DB from `POSTGRES_URL`. To serve several
-clients from a single server, set `DATABRILL_CONFIG` to a JSON file that maps
+Set `DATABRILL_CONFIG` to a JSON file that maps
 `wsid → { database, merchants }` (see `databrill.config.example.json`). Connection
 strings use `${VAR}` placeholders expanded from the environment, so secrets stay
-in `.env` and the config is safe to commit.
+in `.env` and the config is safe to commit. Each entry must use its workspace's
+own provisioned role and its own environment variable.
 
 ```jsonc
 {
@@ -79,34 +78,31 @@ in `.env` and the config is safe to commit.
 
 With a config the server:
 
-- pools one connection per workspace, `search_path` set to `database.schema`
-  (defaults to `w<wsid>`);
-- adds an optional `wsid` argument (enum of the configured workspaces) to every
+- pools one connection per workspace, taking each registry entry's connection
+  string at its word;
+- adds a required `wsid` argument (enum of the configured workspaces) to every
   tool, plus a `listWorkspaces` discovery tool;
-- routes each call by `wsid` → the only workspace → inference from the `stores`
-  argument (its country / merchant / region). A store that exists in more than one
-  workspace is ambiguous and returns an error asking for an explicit `wsid`.
+- routes each call only by that explicit `wsid`. Registry size and `stores` never
+  select a workspace.
 
 Each `merchantId` must belong to exactly one workspace.
 
 Workspace-specific tools are announced only when their feature is enabled.
 Set `features.tflInventory` to `true` only for a workspace with The Fulfillment
-Lab data. In single-`POSTGRES_URL` mode, set
-`DATABRILL_TFL_INVENTORY_ENABLED=true` instead. The CLI command enforces the same
-flag.
+Lab data. The CLI command enforces the same flag.
 
 The SQL tools use two flags, not one:
 
-- `features.sql` (`DATABRILL_SQL_ENABLED`) gates `executeSql`, `listTables` and
+- `features.sql` enables `executeSql`, `listTables` and
   `describeTable`;
-- `features.sqlWrite` (`DATABRILL_SQL_WRITE_ENABLED`) gates `writeSql` alone.
+- `features.sqlWrite` enables `writeSql` alone.
 
 They are separate so a read-only session can announce the read tools and nothing
 else — one flag could not express that, and filtering by tool name outside the
 feature mechanism is exactly what the tools' declared access kind exists to avoid.
 
-The CLI follows the same routing — pass `--wsid` (or rely on inference from
-`--stores`), e.g. `deno run -A bin/cli.ts loadAds --wsid 100000001 --stores US --when P7D --groupBy store`.
+The CLI follows the same routing and requires `--wsid`, e.g.
+`deno run -A bin/cli.ts loadAds --wsid 100000001 --stores US --when P7D --groupBy store`.
 
 ## Parity
 
@@ -137,10 +133,10 @@ read `information_schema` scoped to the connection's own `current_schemas(false)
 and `writeSql` runs one statement on a connection allowed to write.
 
 ```bash
-deno run -A bin/cli.ts listTables
-deno run -A bin/cli.ts describeTable --table amazon_merchant
-deno run -A bin/cli.ts executeSql --sql 'SELECT "merchantId" FROM "amazon_merchant"' --limit 50
-deno run -A bin/cli.ts writeSql --sql "UPDATE brand_config_x SET label = 'y' WHERE id = 1"
+deno run -A bin/cli.ts listTables --wsid 100000001
+deno run -A bin/cli.ts describeTable --wsid 100000001 --table amazon_merchant
+deno run -A bin/cli.ts executeSql --wsid 100000001 --sql 'SELECT "merchantId" FROM "amazon_merchant"' --limit 50
+deno run -A bin/cli.ts writeSql --wsid 100000001 --sql "UPDATE brand_config_x SET label = 'y' WHERE id = 1"
 ```
 
 What bounds these tools, in order of importance:
@@ -164,4 +160,4 @@ errors, which carry the host and port, never reach the client.
 
 Each tool declares `access: "read" | "write"` and receives the client the frontend
 hands it. No tool opens, selects or reconfigures a connection, so read/write
-routing stays enforceable at one seam in the frontend.
+routing stays enforceable in one place in the frontend.

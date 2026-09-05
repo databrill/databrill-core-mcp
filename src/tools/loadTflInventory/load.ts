@@ -9,6 +9,9 @@
  */
 
 import type { Sql } from "postgres";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { sql as ksql, type SqlBool } from "kysely";
+import { runCompiled } from "../../runCompiled.ts";
 import type { LoadTflInventoryParams, LoadTflInventoryResult, TflInventoryRow, TflSkuMapping } from "./types.ts";
 
 const REQUIRED_TABLES = [
@@ -18,19 +21,6 @@ const REQUIRED_TABLES = [
 ] as const;
 const DEFAULT_LIMIT = 250;
 const MAX_LIMIT = 1000;
-
-interface DbInventoryRow {
-	readonly snapshotDate: string;
-	readonly connectorId: string;
-	readonly warehouseId: number;
-	readonly warehouseName: string | null;
-	readonly productId: number;
-	readonly productName: string | null;
-	readonly quantity: number;
-	readonly allocated: number;
-	readonly available: number;
-	readonly skus: unknown;
-}
 
 function fail(message: string): never {
 	throw new Error(message);
@@ -135,80 +125,116 @@ export async function loadTflInventory(
 		return emptyResult(asOf, limit, missingTables);
 	}
 
-	const productFilter = products === null ? sql`` : sql`
-			AND (
-				"warehouse"."productId"::TEXT = ANY(${products})
-				OR LOWER(COALESCE("product"."productName", '')) = ANY(${products.map((value) => value.toLowerCase())})
-				OR EXISTS (
-					SELECT 1
-					FROM "tfl_products_v1__SkuProduct" AS "filterSku"
-					WHERE "filterSku"."connectorId" = "warehouse"."connectorId"
-						AND "filterSku"."productId" = "warehouse"."productId"
-						AND LOWER("filterSku"."sku") = ANY(${products.map((value) => value.toLowerCase())})
-				)
-			)
-		`;
-	const warehouseFilter = warehouses === null ? sql`` : sql`
-			AND (
-				"warehouse"."warehouseId"::TEXT = ANY(${warehouses})
-				OR LOWER(COALESCE("warehouse"."warehouseName", '')) = ANY(${
-		warehouses.map((value) => value.toLowerCase())
-	})
-			)
-		`;
-	const availableFilter = maxAvailable === null ? sql`` : sql`AND "warehouse"."available" <= ${maxAvailable}`;
+	// One builder for the whole invocation, and where a future
+	// `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
 
-	const rows = await sql<DbInventoryRow[]>`
-		WITH "selectedSnapshot" AS (
-			SELECT
-				"connectorId",
-				MAX("localdate") AS "snapshotDate"
-			FROM "tfl_products_v1__WarehouseInventory"
-			WHERE (${asOf}::DATE IS NULL OR "localdate" <= ${asOf}::DATE)
-			GROUP BY "connectorId"
-		),
-		"skuMap" AS (
-			SELECT
-				"connectorId",
-				"productId",
-				JSONB_AGG(
-					JSONB_BUILD_OBJECT('sku', "sku", 'qtyMultiplier', "qtyMultiplier")
-					ORDER BY "sku"
-				) AS "skus"
-			FROM "tfl_products_v1__SkuProduct"
-			GROUP BY "connectorId", "productId"
-		)
-		SELECT
-			"warehouse"."localdate"::TEXT AS "snapshotDate",
-			"warehouse"."connectorId",
-			"warehouse"."warehouseId",
-			"warehouse"."warehouseName",
-			"warehouse"."productId",
-			"product"."productName",
-			"warehouse"."quantity",
-			"warehouse"."allocated",
-			"warehouse"."available",
-			COALESCE("skuMap"."skus", '[]'::JSONB) AS "skus"
-		FROM "tfl_products_v1__WarehouseInventory" AS "warehouse"
-		INNER JOIN "selectedSnapshot"
-			ON "selectedSnapshot"."connectorId" = "warehouse"."connectorId"
-			AND "selectedSnapshot"."snapshotDate" = "warehouse"."localdate"
-		LEFT JOIN "tfl_products_v1__Inventory" AS "product"
-			ON "product"."connectorId" = "warehouse"."connectorId"
-			AND "product"."productId" = "warehouse"."productId"
-		LEFT JOIN "skuMap"
-			ON "skuMap"."connectorId" = "warehouse"."connectorId"
-			AND "skuMap"."productId" = "warehouse"."productId"
-		WHERE TRUE
-			${productFilter}
-			${warehouseFilter}
-			${availableFilter}
-		ORDER BY
-			"warehouse"."available" ASC,
-			"product"."productName" ASC NULLS LAST,
-			"warehouse"."warehouseName" ASC NULLS LAST
-		LIMIT ${limit + 1}
-	`;
+	let query = db
+		.with("selectedSnapshot", (qb) =>
+			qb
+				.selectFrom("tfl_products_v1__WarehouseInventory")
+				.select((eb) => ["connectorId", eb.fn.max("localdate").as("snapshotDate")])
+				// The same JS value is interpolated twice and binds twice, exactly as
+				// the tagged template did. `asOf` is null when the caller gave no date,
+				// and the two `::DATE` casts are what give the parameter a type. These
+				// two parameters are also what keeps the statement off postgres.js's
+				// SIMPLE protocol when the caller passes no filters at all.
+				.where((eb) => ksql<SqlBool>`(${asOf}::DATE IS NULL OR ${eb.ref("localdate")} <= ${asOf}::DATE)`)
+				.groupBy("connectorId"))
+		.with("skuMap", (qb) =>
+			qb
+				.selectFrom("tfl_products_v1__SkuProduct")
+				.select((eb) => [
+					"connectorId",
+					"productId",
+					eb.fn.agg("jsonb_agg", [
+						eb.fn("jsonb_build_object", [
+							ksql.lit("sku"),
+							eb.ref("sku"),
+							ksql.lit("qtyMultiplier"),
+							eb.ref("qtyMultiplier"),
+						]),
+					]).orderBy("sku").as("skus"),
+				])
+				.groupBy(["connectorId", "productId"]))
+		.selectFrom("tfl_products_v1__WarehouseInventory as warehouse")
+		.innerJoin("selectedSnapshot", (join) =>
+			join
+				.onRef("selectedSnapshot.connectorId", "=", "warehouse.connectorId")
+				.onRef("selectedSnapshot.snapshotDate", "=", "warehouse.localdate"))
+		.leftJoin("tfl_products_v1__Inventory as product", (join) =>
+			join
+				.onRef("product.connectorId", "=", "warehouse.connectorId")
+				.onRef("product.productId", "=", "warehouse.productId"))
+		.leftJoin("skuMap", (join) =>
+			join
+				.onRef("skuMap.connectorId", "=", "warehouse.connectorId")
+				.onRef("skuMap.productId", "=", "warehouse.productId"))
+		.select((eb) => [
+			eb.cast<string>(eb.ref("warehouse.localdate"), "text").as("snapshotDate"),
+			"warehouse.connectorId",
+			"warehouse.warehouseId",
+			"warehouse.warehouseName",
+			"warehouse.productId",
+			"product.productName",
+			"warehouse.quantity",
+			"warehouse.allocated",
+			"warehouse.available",
+			eb.fn.coalesce("skuMap.skus", ksql`'[]'::JSONB`).as("skus"),
+		]);
+
+	if (products !== null) {
+		const lowered = products.map((value) => value.toLowerCase());
+		query = query.where((eb) =>
+			eb.or([
+				eb(eb.cast<string>(eb.ref("warehouse.productId"), "text"), "=", eb.fn.any(ksql.val(products))),
+				eb(
+					ksql<string>`LOWER(${eb.fn.coalesce("product.productName", ksql.lit(""))})`,
+					"=",
+					eb.fn.any(ksql.val(lowered)),
+				),
+				eb.exists(
+					eb
+						.selectFrom("tfl_products_v1__SkuProduct as filterSku")
+						.select((eb2) => eb2.lit(1).as("one"))
+						.whereRef("filterSku.connectorId", "=", "warehouse.connectorId")
+						.whereRef("filterSku.productId", "=", "warehouse.productId")
+						// The correlated subquery has its own expression builder; the
+						// outer `eb` cannot name "filterSku.sku".
+						.where((eb3) =>
+							eb3(ksql<string>`LOWER(${eb3.ref("filterSku.sku")})`, "=", eb3.fn.any(ksql.val(lowered)))
+						),
+				),
+			])
+		);
+	}
+	if (warehouses !== null) {
+		const lowered = warehouses.map((value) => value.toLowerCase());
+		query = query.where((eb) =>
+			eb.or([
+				eb(eb.cast<string>(eb.ref("warehouse.warehouseId"), "text"), "=", eb.fn.any(ksql.val(warehouses))),
+				eb(
+					ksql<string>`LOWER(${eb.fn.coalesce("warehouse.warehouseName", ksql.lit(""))})`,
+					"=",
+					eb.fn.any(ksql.val(lowered)),
+				),
+			])
+		);
+	}
+	if (maxAvailable !== null) {
+		query = query.where("warehouse.available", "<=", maxAvailable);
+	}
+
+	const rows = await runCompiled(
+		sql,
+		query
+			.orderBy("warehouse.available", "asc")
+			.orderBy("product.productName", (ob) => ob.asc().nullsLast())
+			.orderBy("warehouse.warehouseName", (ob) => ob.asc().nullsLast())
+			// `limit + 1` is the truncation probe `isTruncated` below reads. Not `limit`.
+			.limit(limit + 1)
+			.compile(),
+	);
 
 	const isTruncated = rows.length > limit;
 	const data: TflInventoryRow[] = rows.slice(0, limit).map((row) => ({

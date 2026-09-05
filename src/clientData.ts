@@ -16,30 +16,44 @@
 
 import type { Sql } from "postgres";
 import { DateTime } from "luxon";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { sql as ksql } from "kysely";
 import { countryCodeToMarketplaceInfo, marketplaceIdToMarketplaceInfo } from "./amazonConstants.ts";
+import { isoDateParam, runCompiled } from "./runCompiled.ts";
+import { jsonbInt } from "./sqlJson.ts";
 
 // ─── identity (from the client DB) ──────────────────────────────────
 
 /** Active merchant IDs for this client, from `amazon_merchant`. */
 export async function discoverMerchantIds(sql: Sql): Promise<string[]> {
-	const rows = await sql`
-		SELECT "merchantId"
-		FROM "amazon_merchant"
-		WHERE "isActive" = true
-		ORDER BY "merchantId"
-	`;
-	return rows.map((r) => String(r["merchantId"]));
+	const db = createCanonicalQueryBuilder();
+	const rows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amazon_merchant")
+			.select("merchantId")
+			.where("isActive", "=", true)
+			.orderBy("merchantId")
+			.compile(),
+	);
+	return rows.map((r) => r.merchantId);
 }
 
 /** Canonical-country set of the client's real, active stores, from `amazon_store`. */
 export async function discoverConfiguredCountries(sql: Sql): Promise<Set<string>> {
-	const rows = await sql`
-		SELECT DISTINCT "countryCode"
-		FROM "amazon_store"
-		WHERE "isActive" = true AND "isReal" = true
-	`;
+	const db = createCanonicalQueryBuilder();
+	const rows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amazon_store")
+			.select("countryCode")
+			.distinct()
+			.where("isActive", "=", true)
+			.where("isReal", "=", true)
+			.compile(),
+	);
 	const set = new Set<string>();
-	for (const r of rows) set.add(canonCountry(String(r["countryCode"])));
+	for (const r of rows) set.add(canonCountry(r.countryCode));
 	return set;
 }
 
@@ -152,34 +166,48 @@ function isoDate(d: string | Date): string {
  * Uses `item_price - item_promotion_discount` (net of coupons/deals).
  */
 async function loadDailySalesBySite(sql: Sql, merchantIds: string[], since: string): Promise<DailySales[]> {
-	const rows = await sql`
-		SELECT
-			"localdate" AS "date",
-			"merchant_id" AS "merchantId",
-			"marketplace_id" AS "marketplaceId",
-			SUM("item_price" - COALESCE("item_promotion_discount", 0))::numeric AS "sales",
-			MAX("currency") AS "currency",
-			SUM("quantity")::int AS "units",
-			COUNT(DISTINCT "amazon_order_id")::int AS "orders"
-		FROM "amzreport_ALL_ORDERS"
-		WHERE "merchant_id" = ANY(${merchantIds})
-			AND "localdate" >= ${since}
-			AND "localdate" < CURRENT_DATE
-			AND "order_status" != 'Cancelled'
-		GROUP BY "localdate", "merchant_id", "marketplace_id"
-	`;
+	const db = createCanonicalQueryBuilder();
+	const rows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amzreport_ALL_ORDERS")
+			.select((eb) => [
+				// The date column is cast to text in the QUERY: three consumers of
+				// this loader install three different postgres.js date parsers, and
+				// a text column is the only shape `isoDate` sees identically in all
+				// three. Do not move this into `isoDate`.
+				eb.cast<string>(eb.ref("localdate"), "text").as("date"),
+				eb.ref("merchant_id").as("merchantId"),
+				eb.ref("marketplace_id").as("marketplaceId"),
+				eb.cast<string | null>(
+					eb.fn.sum<string | null>(
+						ksql<number>`${eb.ref("item_price")} - COALESCE(${eb.ref("item_promotion_discount")}, 0)`,
+					),
+					"numeric",
+				).as("sales"),
+				eb.fn.max("currency").as("currency"),
+				eb.cast<number | null>(eb.fn.sum<string | null>("quantity"), "integer").as("units"),
+				eb.cast<number>(eb.fn.count("amazon_order_id").distinct(), "integer").as("orders"),
+			])
+			.where((eb) => eb("merchant_id", "=", eb.fn.any(ksql.val(merchantIds))))
+			.where("localdate", ">=", isoDateParam(since))
+			.where("localdate", "<", ksql<Temporal.PlainDate>`CURRENT_DATE`)
+			.where("order_status", "!=", "Cancelled")
+			.groupBy(["localdate", "merchant_id", "marketplace_id"])
+			.compile(),
+	);
 	const out: DailySales[] = [];
 	for (const r of rows) {
-		const site = siteOf(r["marketplaceId"]);
+		const site = siteOf(r.marketplaceId);
 		if (!site) continue;
 		out.push({
-			date: isoDate(r["date"]),
-			merchantId: r["merchantId"],
+			date: isoDate(r.date),
+			merchantId: r.merchantId,
 			site,
-			currency: r["currency"] ?? "",
-			sales: Number(r["sales"] ?? 0),
-			units: Number(r["units"] ?? 0),
-			orders: Number(r["orders"] ?? 0),
+			currency: r.currency ?? "",
+			sales: Number(r.sales ?? 0),
+			units: Number(r.units ?? 0),
+			orders: Number(r.orders ?? 0),
 		});
 	}
 	return out;
@@ -187,44 +215,52 @@ async function loadDailySalesBySite(sql: Sql, merchantIds: string[], since: stri
 
 /** Daily advertising metrics per site since `since`, from the placement report. */
 async function loadDailyAdBySite(sql: Sql, merchantIds: string[], since: string): Promise<DailyAd[]> {
-	const rows = await sql`
-		SELECT
-			"date",
-			"merchantId",
-			"marketplaceId",
-			SUM("totalCost")::numeric AS "spend",
-			SUM("clicks")::int AS "clicks",
-			SUM("impressions")::int AS "impressions",
-			SUM("purchases")::int AS "orders",
-			SUM("sales")::numeric AS "adSales"
-		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
-		WHERE "merchantId" = ANY(${merchantIds})
-			AND "date" >= ${since}
-			-- Sponsored Brands stores each cost twice: an aggregate row
-			-- (advertisedProductId = '') and per-ASIN breakdown rows. Keep the
-			-- aggregate row only so SB is not double-counted; SP/SD are unaffected.
-			-- This query groups by date/merchant/marketplace only (store/total grain,
-			-- see loadStoreSeries/mergeDaily below — no ASIN dimension), so the
-			-- level-aware refinement in loadAds.ts's sbDoubleCountFilter (which keeps
-			-- per-ASIN SB rows instead at ASIN/product grain) does not apply here: the
-			-- aggregate-only filter is already the correct behavior for every caller
-			-- of this function.
-			AND NOT ("adProduct" = 'Sponsored Brands' AND "advertisedProductId" <> '')
-		GROUP BY "date", "merchantId", "marketplaceId"
-	`;
+	const db = createCanonicalQueryBuilder();
+	const rows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+			.select((eb) => [
+				// Cast to text in the query — see loadDailySalesBySite above.
+				eb.cast<string>(eb.ref("date"), "text").as("date"),
+				"merchantId",
+				"marketplaceId",
+				eb.cast<string | null>(eb.fn.sum<string | null>("totalCost"), "numeric").as("spend"),
+				eb.cast<number | null>(eb.fn.sum<string | null>("clicks"), "integer").as("clicks"),
+				eb.cast<number | null>(eb.fn.sum<string | null>("impressions"), "integer").as("impressions"),
+				eb.cast<number | null>(eb.fn.sum<string | null>("purchases"), "integer").as("orders"),
+				eb.cast<string | null>(eb.fn.sum<string | null>("sales"), "numeric").as("adSales"),
+			])
+			.where((eb) => eb("merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+			.where("date", ">=", isoDateParam(since))
+			// Sponsored Brands stores each cost twice: an aggregate row
+			// (advertisedProductId = '') and per-ASIN breakdown rows. Keep the
+			// aggregate row only so SB is not double-counted; SP/SD are unaffected.
+			// This query groups by date/merchant/marketplace only (store/total grain,
+			// see loadStoreSeries/mergeDaily below — no ASIN dimension), so the
+			// level-aware refinement in loadAds.ts's sbDoubleCountFilter (which keeps
+			// per-ASIN SB rows instead at ASIN/product grain) does not apply here: the
+			// aggregate-only filter is already the correct behavior for every caller
+			// of this function.
+			.where((eb) =>
+				eb.not(eb.and([eb("adProduct", "=", "Sponsored Brands"), eb("advertisedProductId", "<>", "")]))
+			)
+			.groupBy(["date", "merchantId", "marketplaceId"])
+			.compile(),
+	);
 	const out: DailyAd[] = [];
 	for (const r of rows) {
-		const site = siteOf(r["marketplaceId"]);
+		const site = siteOf(r.marketplaceId);
 		if (!site) continue;
 		out.push({
-			date: isoDate(r["date"]),
-			merchantId: r["merchantId"],
+			date: isoDate(r.date),
+			merchantId: r.merchantId,
 			site,
-			spend: Number(r["spend"] ?? 0),
-			clicks: Number(r["clicks"] ?? 0),
-			impressions: Number(r["impressions"] ?? 0),
-			orders: Number(r["orders"] ?? 0),
-			adSales: Number(r["adSales"] ?? 0),
+			spend: Number(r.spend ?? 0),
+			clicks: Number(r.clicks ?? 0),
+			impressions: Number(r.impressions ?? 0),
+			orders: Number(r.orders ?? 0),
+			adSales: Number(r.adSales ?? 0),
 		});
 	}
 	return out;
@@ -237,27 +273,36 @@ async function loadDailyAdBySite(sql: Sql, merchantIds: string[], since: string)
  * than failing. Sales come from ALL_ORDERS (net, fresh); sessions only exist here.
  */
 async function loadDailySessionsBySite(sql: Sql, merchantIds: string[], since: string): Promise<DailySessions[]> {
+	const db = createCanonicalQueryBuilder();
 	try {
-		const rows = await sql`
-			SELECT
-				"date",
-				"merchantId",
-				"marketplaceId",
-				SUM(("traffic"->>'sessions')::int)::int AS "sessions"
-			FROM "amzreport_SALES_AND_TRAFFIC__skuByDay"
-			WHERE "merchantId" = ANY(${merchantIds})
-				AND "date" >= ${since}
-			GROUP BY "date", "merchantId", "marketplaceId"
-		`;
+		const rows = await runCompiled(
+			sql,
+			db
+				.selectFrom("amzreport_SALES_AND_TRAFFIC__skuByDay")
+				.select((eb) => [
+					// Cast to text in the query — see loadDailySalesBySite above.
+					eb.cast<string>(eb.ref("date"), "text").as("date"),
+					"merchantId",
+					"marketplaceId",
+					eb.cast<number | null>(
+						eb.fn.sum<number | null>(jsonbInt(eb.ref("traffic"), "sessions")),
+						"integer",
+					).as("sessions"),
+				])
+				.where((eb) => eb("merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+				.where("date", ">=", isoDateParam(since))
+				.groupBy(["date", "merchantId", "marketplaceId"])
+				.compile(),
+		);
 		const out: DailySessions[] = [];
 		for (const r of rows) {
-			const site = siteOf(r["marketplaceId"]);
+			const site = siteOf(r.marketplaceId);
 			if (!site) continue;
 			out.push({
-				date: isoDate(r["date"]),
-				merchantId: r["merchantId"],
+				date: isoDate(r.date),
+				merchantId: r.merchantId,
 				site,
-				sessions: Number(r["sessions"] ?? 0),
+				sessions: Number(r.sessions ?? 0),
 			});
 		}
 		return out;

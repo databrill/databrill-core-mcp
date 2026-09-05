@@ -19,7 +19,7 @@
  * workspace's tables has nothing there worth reasoning about. It applies to the LISTING
  * ONLY — `describeTable("kysely_migration")` still answers with the columns, and
  * `executeSql` still queries the table for a caller who names it. That is why it is its
- * own predicate and must never be folded into `isSupportedTableName`: doing so would make
+ * own predicate and must never be merged into `isSupportedTableName`: doing so would make
  * `describeTable` refuse a table that plainly exists, which is a worse answer than its
  * columns.
  *

@@ -138,7 +138,7 @@ function serializedByteLength(row: SqlRow): number {
 /**
  * Validate a caller-requested row cap. A request ABOVE the maximum is REJECTED
  * with a message naming the maximum rather than silently clamped, so an agent
- * learns the ceiling instead of quietly receiving less than it asked for.
+ * learns the ceiling instead of receiving less than it asked for with no warning.
  */
 export function parseRowLimit(value: number | undefined): number {
 	if (value === undefined) {
@@ -429,7 +429,7 @@ export function runReadStatement(
 		// so utility statements — `EXPLAIN`, `SHOW` — lost their trailing rows entirely
 		// while the result still claimed to be complete.
 		//
-		// `stopped` is load-bearing, not defensive: `CloseComplete`
+		// `stopped` is required, not defensive: `CloseComplete`
 		// (`connection.js:852-855`) also resolves with a row-bearing `Result`, so
 		// appending after an early stop could carry the result PAST the cap that
 		// stopped it.

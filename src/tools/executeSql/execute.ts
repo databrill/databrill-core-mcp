@@ -14,7 +14,7 @@
  * The tool receives its `Sql` and never opens, selects or reconfigures a
  * connection. Which connection it gets — and therefore whether a write could
  * ever succeed — is decided by the frontend that binds it, from the tool's
- * declared `access` kind. That is the single seam where read/write routing is
+ * declared `access` kind. That is the single place where read/write routing is
  * enforceable; four tools each choosing for themselves would not be.
  */
 

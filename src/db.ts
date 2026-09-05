@@ -1,76 +1,71 @@
 /**
  * Connection helper. The tool logic never opens a connection itself — a `sql`
  * is injected by the frontend (CLI / stdio / hosted), so the same loaders run
- * against a client's own DB (POSTGRES_URL) or a resolved target DB (hosted).
+ * against a registry-selected workspace DB (local) or a resolved target DB (hosted).
  *
- * `createSqlProvider` adds multi-workspace routing: given a `Config`, it lazily
- * pools one connection per workspace (keyed by wsid, `search_path` set to the
- * workspace schema) and resolves each tool call to the right one. With no config
- * it degrades to a single `POSTGRES_URL` pool — the original behaviour.
+ * `createSqlProvider` lazily pools one connection per explicitly named
+ * workspace, and hands it back with no questions asked. Each registry entry must
+ * carry that workspace's own credential.
+ *
+ * It does NOT check that the credential is the role it claims to be. A check that
+ * read `current_user` and `search_path` stood here until 2026-09-04 and was
+ * removed: the registry is the consumer's own hand-edited `databrill.config.json`,
+ * so the only thing it could catch was that consumer misconfiguring their own
+ * workspace — which shows up immediately as recognisably wrong data in a
+ * workspace whose data they know. Do not reintroduce it.
  */
 
 import { makePostgresJsTypes } from "@jsr/databrill__core-pg-kysely/canonical";
 import postgres, { type Sql } from "postgres";
 import { type Config, resolveWorkspace } from "./config.ts";
 
-/** Open a postgres client to the target DB. Cross-runtime: reads `process.env`. */
-export function getSql(connectionString?: string, schema?: string): Sql {
-	const url = connectionString ?? process.env.POSTGRES_URL;
-	if (!url) {
-		throw new Error("POSTGRES_URL environment variable is required");
-	}
-	return postgres(url, {
+/** Open a postgres client to the target DB. */
+export function getSql(connectionString: string): Sql {
+	return postgres(connectionString, {
 		max: 5,
 		idle_timeout: 30,
 		connect_timeout: 10,
 		types: makePostgresJsTypes(),
 		transform: { undefined: null },
-		...(schema ? { connection: { search_path: schema } } : {}),
 	});
 }
 
 export interface SqlProvider {
-	/** Resolve a tool call's arguments to the connection for its workspace. */
-	getSqlForArgs(args: Record<string, unknown>): Sql;
+	/**
+	 * Resolve a tool call's arguments to the connection for its workspace.
+	 *
+	 * Returns a promise although nothing here awaits: opening a pool is the kind of
+	 * thing that acquires a resource, `registerTools` accepts either shape, and the
+	 * CLI's `resolveSql` is built around a promise. Narrowing it to `Sql` would
+	 * change a mirrored package's exported signature to save one microtask.
+	 */
+	getSqlForArgs(args: Record<string, unknown>): Promise<Sql>;
 	/** Close every pool this provider opened. */
 	endAll(): Promise<void>;
 }
 
 /**
- * Build a connection provider. With a `Config`, connections are pooled per
- * workspace and resolved via `resolveWorkspace`; without one, a single
- * `POSTGRES_URL` pool serves every call (wsid is ignored).
+ * Build a connection provider. Connections are pooled per workspace and every
+ * call is resolved from its explicit `wsid`.
  */
-export function createSqlProvider(config: Config | null): SqlProvider {
+export function createSqlProvider(config: Config): SqlProvider {
 	const pools = new Map<string, Sql>();
+	// `allSettled`, so one pool that fails to close cannot skip `clear()` and strand
+	// the rest of the map pointing at handles nothing will ever end.
 	const endAll = async (): Promise<void> => {
-		await Promise.all([...pools.values()].map((s) => s.end()));
+		await Promise.allSettled([...pools.values()].map((sql) => sql.end()));
 		pools.clear();
 	};
-
-	if (!config) {
-		return {
-			getSqlForArgs() {
-				let sql = pools.get("__default__");
-				if (!sql) {
-					sql = getSql();
-					pools.set("__default__", sql);
-				}
-				return sql;
-			},
-			endAll,
-		};
-	}
 
 	return {
 		getSqlForArgs(args) {
 			const ws = resolveWorkspace(config, args);
 			let sql = pools.get(ws.wsid);
-			if (!sql) {
-				sql = getSql(ws.database.postgresUrl, ws.database.schema);
+			if (sql === undefined) {
+				sql = getSql(ws.database.postgresUrl);
 				pools.set(ws.wsid, sql);
 			}
-			return sql;
+			return Promise.resolve(sql);
 		},
 		endAll,
 	};

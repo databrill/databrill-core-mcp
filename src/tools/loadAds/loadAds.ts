@@ -1,5 +1,14 @@
-import postgres from "postgres";
+import type postgres from "postgres";
 import { Either, Schema } from "effect";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import {
+	type AliasedExpression,
+	type Expression,
+	expressionBuilder,
+	type ExpressionWrapper,
+	type RawBuilder,
+	sql as ksql,
+} from "kysely";
 import {
 	type AmazonMarketplaceInfo,
 	countryCodeToMarketplaceInfo,
@@ -7,7 +16,18 @@ import {
 	regionCountryCodes,
 } from "../../amazonConstants.ts";
 import { parseWhenAst, type WhenAst_Duration } from "../../parseWhenAst.ts";
-import { createSqlParams, type SqlParams } from "../../sqlParams.ts";
+import { boundTrue, isoDateParam, runCompiled } from "../../runCompiled.ts";
+import { jsonbText } from "../../sqlJson.ts";
+
+/**
+ * The canonical query builder's own type, derived from its factory.
+ *
+ * `src/` may not import the generated `DB` interface (the boundary scan in
+ * `tests/unit/` rejects a `../services` or `@databrill/` specifier), and the
+ * canonical entry point does not export it, so a function that takes the builder
+ * as a parameter names it this way.
+ */
+type CanonicalDb = ReturnType<typeof createCanonicalQueryBuilder>;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,12 +146,6 @@ function fail(msg: string): never {
 // Store Resolution
 // ---------------------------------------------------------------------------
 
-interface StoreRow {
-	merchantId: string;
-	marketplaceId: string;
-	storeName: string;
-}
-
 // Resolve a bare scope token (no merchant qualifier) to marketplace infos.
 // Supports '*', region keys (na/eu/fe), country codes, and marketplace IDs.
 // Returns [] if the token isn't recognized as a scope.
@@ -168,11 +182,20 @@ function resolveScope(raw: string): AmazonMarketplaceInfo[] {
 // storefront label). Merchant IDs contain no '-', so splitting on the first
 // '-' is unambiguous.
 export async function resolveStores(spec: string, sql: postgres.Sql): Promise<ResolvedStore[]> {
-	const rows = (await sql`
-		SELECT "merchantId", "marketplaceId", "storeName"
-		FROM amazon_store
-		WHERE "isReal" AND "isActive"
-	`) as unknown as StoreRow[];
+	// One builder per invocation; it is where a future `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
+	const rows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amazon_store")
+			.select(["merchantId", "marketplaceId", "storeName"])
+			// Both columns are non-null `boolean`, so `= true` says exactly what the bare
+			// `WHERE "isReal" AND "isActive"` said — and each binds a parameter, which is
+			// what keeps this query off postgres.js's SIMPLE protocol.
+			.where("isReal", "=", true)
+			.where("isActive", "=", true)
+			.compile(),
+	);
 
 	// marketplaceId -> merchants selling there; plus merchantId -> name lookup
 	const merchantsByMarketplace = new Map<string, { merchantId: string; merchantName: string }[]>();
@@ -276,23 +299,6 @@ function distinctMerchants(stores: ResolvedStore[]): ResolvedStore[] {
 	return out;
 }
 
-// `(merchantId, marketplaceId) IN ((..),(..))` over the resolved stores.
-//
-// `merchantId` originates in the `amazon_store` table, so it is BOUND. `marketplaceId`
-// never is: `resolveStores` only ever emits `AmazonMarketplaceInfo.marketplaceId` values
-// from the static `amazonConstants` table, so it stays interpolated.
-function storePairsClause(
-	stores: ResolvedStore[],
-	merchantCol: string,
-	marketplaceCol: string,
-	params: SqlParams,
-): string {
-	const pairs = stores
-		.map((s) => `(${params.add(s.merchantId)}, '${s.marketplaceId}')`)
-		.join(", ");
-	return `(${merchantCol}, ${marketplaceCol}) IN (${pairs})`;
-}
-
 // ---------------------------------------------------------------------------
 // When Resolution
 // ---------------------------------------------------------------------------
@@ -371,11 +377,18 @@ export async function resolveWhen(
 	// Duration alone: end = latest advertising data date. Source-specific
 	// consumers such as loadTraffic parse the same request and provide their own
 	// definitive end date instead of calling this advertising fallback.
-	const latestRow = await sql`
-		SELECT MAX(date)::text AS latest
-		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
-	`;
-	const latest = latestRow[0]?.["latest"];
+	const db = createCanonicalQueryBuilder();
+	const latestRow = await runCompiled(
+		sql,
+		db
+			.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+			.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
+			// A database-wide MAX has no natural value to bind, and an empty parameter
+			// list is what selects postgres.js's SIMPLE protocol. `boundTrue()` supplies one.
+			.where(boundTrue())
+			.compile(),
+	);
+	const latest = latestRow[0]?.latest;
 	if (!latest) fail("No ad data found in database");
 	return resolveTrailingRange(request.duration, latest);
 }
@@ -388,34 +401,37 @@ export async function resolveProducts(
 	productsStr: string,
 	sql: postgres.Sql,
 ): Promise<string[]> {
+	const db = createCanonicalQueryBuilder();
 	const tokens = productsStr.split(",").map((s) => s.trim()).filter(Boolean);
 	const childAsins = new Set<string>();
 
 	for (const token of tokens) {
 		if (ASIN_PATTERN.test(token)) {
 			// Check if parent ASIN -> expand to children
-			const children = await sql`
-				SELECT asin
-				FROM "amzspapi_catalog_items_v20220401__catalogitem"
-				WHERE parent_asin = ${token}
-			`;
+			const children = await runCompiled(
+				sql,
+				db
+					.selectFrom("amzspapi_catalog_items_v20220401__catalogitem")
+					.select("asin")
+					.where("parent_asin", "=", token)
+					.compile(),
+			);
 			if (children.length > 0) {
-				for (const row of children) childAsins.add(row["asin"]);
+				for (const row of children) childAsins.add(row.asin);
 			} else {
 				// Treat as child ASIN directly
 				childAsins.add(token);
 			}
 		} else {
 			// Family name lookup
-			const rows = await sql`
-				SELECT asin
-				FROM brand_config_amazon_asin
-				WHERE family = ${token}
-			`;
+			const rows = await runCompiled(
+				sql,
+				db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token).compile(),
+			);
 			if (rows.length === 0) {
 				console.error(`Warning: no ASINs found for family '${token}'`);
 			}
-			for (const row of rows) childAsins.add(row["asin"]);
+			for (const row of rows) childAsins.add(row.asin);
 		}
 	}
 
@@ -441,48 +457,89 @@ function parseFilter(filterStr: string): FilterExpr {
 // SQL Building Helpers
 // ---------------------------------------------------------------------------
 
-function timeUnitSelectExprs(tu: TimeUnit): string[] {
+/**
+ * One GROUP BY item plus the string key it de-duplicates on.
+ *
+ * `[...new Set(...)]` de-duplicates nothing once the entries are expression
+ * OBJECTS — each call builds a new one — so the key carries the identity the
+ * SQL text used to carry. `country`, `store`, `marketplaceId` and the
+ * multi-marketplace currency grouping all emit `r."marketplaceId"`.
+ */
+interface GroupByEntry {
+	readonly key: string;
+	readonly expr: Expression<unknown>;
+}
+
+function dedupeGroupBy(entries: readonly GroupByEntry[]): Expression<unknown>[] {
+	const seen = new Set<string>();
+	const out: Expression<unknown>[] = [];
+	for (const entry of entries) {
+		if (seen.has(entry.key)) continue;
+		seen.add(entry.key);
+		out.push(entry.expr);
+	}
+	return out;
+}
+
+/**
+ * `date_trunc(<unit>, r.date)`, built from `ksql.lit` and `ksql.ref` only.
+ *
+ * This sub-expression appears in the SELECT list (inside `to_char`) AND in the
+ * GROUP BY, and Postgres matches those by parse-tree equality — two `Param`
+ * nodes with different placeholder numbers are not equal. One function called
+ * from both places is what guarantees byte-identical text.
+ */
+function dateTrunc(unit: string): RawBuilder<unknown> {
+	return ksql`date_trunc(${ksql.lit(unit)}, ${ksql.ref("r.date")})`;
+}
+
+function timeUnitSelectExprs(tu: TimeUnit): AliasedExpression<string, string>[] {
 	switch (tu) {
 		case "DAY":
 			return [
-				`r.date::text AS "dateFirst"`,
-				`r.date::text AS "dateLast"`,
+				ksql<string>`${ksql.ref("r.date")}::text`.as("dateFirst"),
+				ksql<string>`${ksql.ref("r.date")}::text`.as("dateLast"),
 			];
 		case "WEEK":
 			return [
-				`to_char(date_trunc('week', r.date), 'YYYY-MM-DD') AS "dateFirst"`,
-				`to_char(date_trunc('week', r.date) + INTERVAL '6 days', 'YYYY-MM-DD') AS "dateLast"`,
+				ksql<string>`to_char(${dateTrunc("week")}, 'YYYY-MM-DD')`.as("dateFirst"),
+				ksql<string>`to_char(${dateTrunc("week")} + INTERVAL '6 days', 'YYYY-MM-DD')`.as("dateLast"),
 			];
 		case "MONTH":
 			return [
-				`to_char(date_trunc('month', r.date), 'YYYY-MM-DD') AS "dateFirst"`,
-				`to_char(date_trunc('month', r.date) + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD') AS "dateLast"`,
+				ksql<string>`to_char(${dateTrunc("month")}, 'YYYY-MM-DD')`.as("dateFirst"),
+				ksql<string>`to_char(${dateTrunc("month")} + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD')`.as(
+					"dateLast",
+				),
 			];
 		case "QUARTER":
 			return [
-				`to_char(date_trunc('quarter', r.date), 'YYYY-MM-DD') AS "dateFirst"`,
-				`to_char(date_trunc('quarter', r.date) + INTERVAL '3 months' - INTERVAL '1 day', 'YYYY-MM-DD') AS "dateLast"`,
+				ksql<string>`to_char(${dateTrunc("quarter")}, 'YYYY-MM-DD')`.as("dateFirst"),
+				ksql<string>`to_char(${dateTrunc("quarter")} + INTERVAL '3 months' - INTERVAL '1 day', 'YYYY-MM-DD')`
+					.as("dateLast"),
 			];
 		case "YEAR":
 			return [
-				`to_char(date_trunc('year', r.date), 'YYYY-MM-DD') AS "dateFirst"`,
-				`to_char(date_trunc('year', r.date) + INTERVAL '1 year' - INTERVAL '1 day', 'YYYY-MM-DD') AS "dateLast"`,
+				ksql<string>`to_char(${dateTrunc("year")}, 'YYYY-MM-DD')`.as("dateFirst"),
+				ksql<string>`to_char(${dateTrunc("year")} + INTERVAL '1 year' - INTERVAL '1 day', 'YYYY-MM-DD')`.as(
+					"dateLast",
+				),
 			];
 	}
 }
 
-function timeUnitGroupBy(tu: TimeUnit): string {
+function timeUnitGroupBy(tu: TimeUnit): GroupByEntry {
 	switch (tu) {
 		case "DAY":
-			return `r.date`;
+			return { key: `r.date`, expr: ksql.ref("r.date") };
 		case "WEEK":
-			return `date_trunc('week', r.date)`;
+			return { key: `date_trunc('week', r.date)`, expr: dateTrunc("week") };
 		case "MONTH":
-			return `date_trunc('month', r.date)`;
+			return { key: `date_trunc('month', r.date)`, expr: dateTrunc("month") };
 		case "QUARTER":
-			return `date_trunc('quarter', r.date)`;
+			return { key: `date_trunc('quarter', r.date)`, expr: dateTrunc("quarter") };
 		case "YEAR":
-			return `date_trunc('year', r.date)`;
+			return { key: `date_trunc('year', r.date)`, expr: dateTrunc("year") };
 	}
 }
 
@@ -508,184 +565,304 @@ function isProductGrain(dims: readonly GroupByDim[]): boolean {
 //     row only resolves to the ad's *first* creative ASIN via sb_asin_lookup, which
 //     would misattribute — or omit — spend for every other ASIN in the campaign) and
 //     drop the aggregate row so it isn't summed on top of the per-ASIN split.
-function sbDoubleCountFilter(tableAlias: "r", productGrain: boolean): string {
-	return productGrain
-		? `NOT (${tableAlias}."adProduct" = 'Sponsored Brands' AND ${tableAlias}."advertisedProductId" = '')`
-		: `NOT (${tableAlias}."adProduct" = 'Sponsored Brands' AND ${tableAlias}."advertisedProductId" <> '')`;
+//
+// Only the OPERATOR differs between the two, so it lives here on its own while
+// each query builds the predicate with its own expression builder — that keeps
+// `r."adProduct"` and `r."advertisedProductId"` checked against `DB`.
+function sbDoubleCountOp(productGrain: boolean): "=" | "<>" {
+	return productGrain ? "=" : "<>";
 }
 
-// Build resolved ASIN expression for the main query
-// Handles SB ASIN resolution via sb_asin_lookup CTE
-function resolvedAsinExpr(): string {
-	return `COALESCE(
-		NULLIF(r."advertisedProductId", ''),
-		sb_lookup.first_asin,
-		'${UNRESOLVED_ASIN}'
-	)`;
+/**
+ * The resolved advertised ASIN for the search_asin_placement query, handling SB
+ * ASIN resolution via the sb_asin_lookup CTE.
+ *
+ * It appears in the SELECT list, the GROUP BY, two JOIN predicates and the
+ * `--products` WHERE clause. Postgres matches a GROUP BY expression against a
+ * SELECT expression by parse-tree equality, so every call site must emit
+ * byte-identical text — which rules out `eb.val`, whose placeholder number
+ * differs per position. `ksql.ref` and `ksql.lit` only. `UNRESOLVED_ASIN` is a
+ * source constant and stays a literal, exactly as it was.
+ */
+function resolvedAsinExpr(): RawBuilder<string> {
+	return ksql<string>`COALESCE(NULLIF(${ksql.ref("r.advertisedProductId")}, ${ksql.lit("")}), ${
+		ksql.ref("sb_lookup.first_asin")
+	}, ${ksql.lit(UNRESOLVED_ASIN)})`;
 }
 
 // Same for product01 (halo-in uses convertedProductId as the asin)
-function resolvedAsinExprProduct01(): string {
-	return `r."convertedProductId"`;
+function resolvedAsinExprProduct01(): RawBuilder<string> {
+	return ksql.ref<string>("r.convertedProductId");
 }
 
 // ---------------------------------------------------------------------------
 // groupBy -> SQL mapping for the search_asin_placement query
 // ---------------------------------------------------------------------------
 
-interface DimSql {
-	selectExprs: string[];
-	groupByExprs: string[];
-	outputCols: string[];
-	needsCampaignJoin: boolean;
-	needsAdJoin: boolean;
-	needsFamilyJoin: boolean;
-	needsParentAsinJoin: boolean;
+interface DimJoinFlags {
+	readonly needsCampaignJoin: boolean;
+	readonly needsAdJoin: boolean;
+	readonly needsFamilyJoin: boolean;
+	readonly needsParentAsinJoin: boolean;
 }
 
-function buildDimSql(
-	dims: GroupByDim[],
-	stores: ResolvedStore[],
-	tableAlias: "r",
-	isHaloIn: boolean,
-	params: SqlParams,
-): DimSql {
-	const selectExprs: string[] = [];
-	const groupByExprs: string[] = [];
+interface DimPlan extends DimJoinFlags {
+	readonly outputCols: string[];
+}
+
+/**
+ * The half of the dimension mapping that needs neither stores nor expressions:
+ * the output column names and which optional joins the dimensions require.
+ *
+ * `mergeResults` wants only the names, and both query builders need the join
+ * flags BEFORE they can build a select list — so this is pure and is the one
+ * place either answer is written.
+ */
+function dimPlan(dims: GroupByDim[]): DimPlan {
 	const outputCols: string[] = [];
 	let needsCampaignJoin = false;
 	let needsAdJoin = false;
 	let needsFamilyJoin = false;
 	let needsParentAsinJoin = false;
 
-	const resolvedAsin = isHaloIn ? resolvedAsinExprProduct01() : resolvedAsinExpr();
-
 	for (const dim of dims) {
 		switch (dim) {
 			case "asin":
-				selectExprs.push(`${resolvedAsin} AS "asin"`);
-				groupByExprs.push(resolvedAsin);
 				outputCols.push("asin");
 				break;
 			case "family":
 				needsFamilyJoin = true;
-				selectExprs.push(`fam.family AS "family"`);
-				groupByExprs.push(`fam.family`);
 				outputCols.push("family");
 				break;
 			case "parentAsin":
 				needsParentAsinJoin = true;
-				selectExprs.push(`cat.parent_asin AS "parentAsin"`);
-				groupByExprs.push(`cat.parent_asin`);
 				outputCols.push("parentAsin");
 				break;
 			case "campaign":
 				needsCampaignJoin = true;
-				selectExprs.push(`${tableAlias}."campaignId" AS "campaignId"`);
-				selectExprs.push(`camp.name AS "campaignName"`);
-				groupByExprs.push(`${tableAlias}."campaignId"`, `camp.name`);
 				outputCols.push("campaignId", "campaignName");
 				break;
 			case "adType":
 				needsCampaignJoin = true;
 				needsAdJoin = true;
-				selectExprs.push(`
-					CASE
-						WHEN camp."adProduct" = 'SPONSORED_PRODUCTS' THEN 'SP'
-						WHEN camp."adProduct" = 'SPONSORED_DISPLAY' THEN 'SD'
-						WHEN camp."adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO') THEN
-							CASE
-								WHEN ad."adType" IN ('VIDEO', 'BRAND_VIDEO') THEN 'SBV'
-								ELSE 'SB'
-							END
-						WHEN ${tableAlias}."adProduct" = 'Sponsored Products' THEN 'SP'
-						WHEN ${tableAlias}."adProduct" = 'Sponsored Display' THEN 'SD'
-						WHEN ${tableAlias}."adProduct" = 'Sponsored Brands' THEN
-							CASE
-								WHEN ad."adType" IN ('VIDEO', 'BRAND_VIDEO') THEN 'SBV'
-								ELSE 'SB'
-							END
-						ELSE COALESCE(camp."adProduct", ${tableAlias}."adProduct")
-					END AS "adType"`);
-				groupByExprs.push(
-					`camp."adProduct"`,
-					`ad."adType"`,
-					`${tableAlias}."adProduct"`,
-				);
 				outputCols.push("adType");
 				break;
 			case "placement":
-				selectExprs.push(`${tableAlias}."placementClassification" AS "placement"`);
-				groupByExprs.push(`${tableAlias}."placementClassification"`);
 				outputCols.push("placement");
 				break;
 			case "target":
-				selectExprs.push(`${tableAlias}.target AS "target"`);
-				groupByExprs.push(`${tableAlias}.target`);
 				outputCols.push("target");
 				break;
 			case "adgroup":
-				selectExprs.push(`${tableAlias}."adGroupId" AS "adGroupId"`);
-				groupByExprs.push(`${tableAlias}."adGroupId"`);
 				outputCols.push("adGroupId");
 				break;
-			case "country": {
-				// Map marketplaceId -> country via CASE. Both `marketplaceId` and
-				// `countryCode` come from the static `amazonConstants` marketplace table
-				// (never the DB, never caller text), so they stay interpolated.
-				const whenClauses = distinctMarketplaces(stores)
-					.map((s) => `WHEN ${tableAlias}."marketplaceId" = '${s.marketplaceId}' THEN '${s.countryCode}'`)
-					.join(" ");
-				selectExprs.push(`CASE ${whenClauses} END AS "country"`);
-				groupByExprs.push(`${tableAlias}."marketplaceId"`);
+			case "country":
 				outputCols.push("country");
 				break;
-			}
-			case "store": {
-				// Storefront label per marketplace (e.g. Amazon.de). `storeName` here is
-				// built by `resolveStores` from the static marketplace `domainName`, NOT
-				// from `amazon_store."storeName"` — constants, so interpolation is safe.
-				const whenClauses = distinctMarketplaces(stores)
-					.map((s) => `WHEN ${tableAlias}."marketplaceId" = '${s.marketplaceId}' THEN '${s.storeName}'`)
-					.join(" ");
-				selectExprs.push(`CASE ${whenClauses} END AS "store"`);
-				groupByExprs.push(`${tableAlias}."marketplaceId"`);
+			case "store":
 				outputCols.push("store");
 				break;
-			}
-			case "merchant": {
-				// Seller account: merchantId + its amazon_store name. BOTH are read out of
-				// `amazon_store`, so both are bound rather than quote-escaped.
-				const whenClauses = distinctMerchants(stores)
-					.map((s) =>
-						`WHEN ${tableAlias}."merchantId" = ${params.add(s.merchantId)} THEN ${
-							params.add(s.merchantName)
-						}::text`
-					)
-					.join(" ");
-				selectExprs.push(`${tableAlias}."merchantId" AS "merchantId"`);
-				selectExprs.push(`CASE ${whenClauses} END AS "merchantName"`);
-				groupByExprs.push(`${tableAlias}."merchantId"`);
+			case "merchant":
 				outputCols.push("merchantId", "merchantName");
 				break;
-			}
 			case "marketplaceId":
-				selectExprs.push(`${tableAlias}."marketplaceId" AS "marketplaceId"`);
-				groupByExprs.push(`${tableAlias}."marketplaceId"`);
 				outputCols.push("marketplaceId");
 				break;
 		}
 	}
 
-	return {
-		selectExprs,
-		groupByExprs,
-		outputCols,
-		needsCampaignJoin,
-		needsAdJoin,
-		needsFamilyJoin,
-		needsParentAsinJoin,
-	};
+	return { outputCols, needsCampaignJoin, needsAdJoin, needsFamilyJoin, needsParentAsinJoin };
+}
+
+/**
+ * A TABLE-LESS expression builder, shared by both queries' dimension expressions.
+ *
+ * The two queries read different tables: `placementClassification` and `target`
+ * exist on `amzadapi_reports_v1__search_asin_placement__byDay` and NOT on
+ * `amzadapi_reports_v1__product01__byDay`, in the generated `DB` and in the
+ * fixture schema alike. So one TYPED builder cannot serve both — `eb.ref("r.target")`
+ * would not compile against the halo-in query. Today `--groupBy target` or
+ * `--groupBy placement` makes query 2 fail at runtime, and that is existing
+ * behaviour which is preserved here deliberately rather than fixed.
+ *
+ * The consequence, and it is worth stating rather than reading as an oversight:
+ * every `r.` / `camp.` / `ad.` / `fam.` / `cat.` reference in the dimension
+ * expressions below is written with `ksql.ref` and is NOT checked against `DB`.
+ * Everything else in both queries — the metric aggregates, the WHERE predicates
+ * on `r.*`, the CTE and every join predicate — stays typed.
+ */
+const xb = expressionBuilder<Record<string, never>, never>();
+
+type DimExpression<T> = ExpressionWrapper<Record<string, never>, never, T>;
+
+/**
+ * A bound text value for a CASE branch.
+ *
+ * `cast($n as text)` rather than a naked `$n`: a CASE whose every branch is an
+ * untyped parameter leaves Postgres nothing to resolve the result type from.
+ * The string-built version already wrote `::text` on the merchant branch for
+ * exactly this reason.
+ */
+function textVal(value: string): DimExpression<string> {
+	return xb.cast<string>(xb.val(value), "text");
+}
+
+/**
+ * `CASE WHEN <ref> = <match> THEN <label> … END`, one branch per row.
+ *
+ * The values were interpolated as quoted SQL literals before: `marketplaceId`,
+ * `countryCode`, `storeName` and `currency` come from the static
+ * `amazonConstants` marketplace table, while `merchantId` / `merchantName` are
+ * read out of `amazon_store` and were already bound. `eb.case()` binds them all,
+ * which is a strict improvement — and none of these expressions reaches a GROUP
+ * BY, so the bound parameters cannot trip the parse-tree-equality rule.
+ */
+function caseOverRef(
+	ref: string,
+	rows: readonly ResolvedStore[],
+	match: (store: ResolvedStore) => string,
+	label: (store: ResolvedStore) => string,
+): DimExpression<string | null> {
+	const first = rows[0];
+	// `resolveStores` fails rather than returning an empty list, so this is
+	// unreachable; the string-built version emitted `CASE  END`, a syntax error.
+	if (!first) fail("No stores resolved");
+	let expr = xb.case().when(ksql.ref<string>(ref), "=", match(first)).then(textVal(label(first)));
+	for (const row of rows.slice(1)) {
+		expr = expr.when(ksql.ref<string>(ref), "=", match(row)).then(textVal(label(row)));
+	}
+	return expr.end();
+}
+
+function marketplaceIdGroupBy(): GroupByEntry {
+	return { key: `r."marketplaceId"`, expr: ksql.ref("r.marketplaceId") };
+}
+
+interface DimExprs {
+	readonly selectExprs: AliasedExpression<unknown, string>[];
+	readonly groupBy: GroupByEntry[];
+}
+
+function buildDimExprs(
+	dims: GroupByDim[],
+	stores: ResolvedStore[],
+	resolvedAsin: RawBuilder<string>,
+): DimExprs {
+	const selectExprs: AliasedExpression<unknown, string>[] = [];
+	const groupBy: GroupByEntry[] = [];
+
+	for (const dim of dims) {
+		switch (dim) {
+			case "asin":
+				selectExprs.push(resolvedAsin.as("asin"));
+				groupBy.push({ key: "resolvedAsin", expr: resolvedAsin });
+				break;
+			case "family":
+				selectExprs.push(ksql.ref<string | null>("fam.family").as("family"));
+				groupBy.push({ key: `fam.family`, expr: ksql.ref("fam.family") });
+				break;
+			case "parentAsin":
+				selectExprs.push(ksql.ref<string | null>("cat.parent_asin").as("parentAsin"));
+				groupBy.push({ key: `cat.parent_asin`, expr: ksql.ref("cat.parent_asin") });
+				break;
+			case "campaign":
+				selectExprs.push(ksql.ref<string>("r.campaignId").as("campaignId"));
+				selectExprs.push(ksql.ref<string | null>("camp.name").as("campaignName"));
+				groupBy.push({ key: `r."campaignId"`, expr: ksql.ref("r.campaignId") });
+				groupBy.push({ key: `camp.name`, expr: ksql.ref("camp.name") });
+				break;
+			case "adType": {
+				// The same nested CASE object is used in two THEN branches; expression
+				// objects are immutable AST wrappers, so sharing one is safe and each
+				// position compiles its own placeholder numbering.
+				const sbOrSbv = xb.case()
+					.when(xb(ksql.ref<string>("ad.adType"), "in", ["VIDEO", "BRAND_VIDEO"]))
+					.then(textVal("SBV"))
+					.else(textVal("SB"))
+					.end();
+				selectExprs.push(
+					xb.case()
+						.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_PRODUCTS").then(textVal("SP"))
+						.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_DISPLAY").then(textVal("SD"))
+						.when(ksql.ref<string>("camp.adProduct"), "in", [
+							"SPONSORED_BRANDS",
+							"SPONSORED_BRANDS_VIDEO",
+						]).then(sbOrSbv)
+						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Products").then(textVal("SP"))
+						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Display").then(textVal("SD"))
+						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Brands").then(sbOrSbv)
+						.else(xb.fn.coalesce(ksql.ref<string>("camp.adProduct"), ksql.ref<string>("r.adProduct")))
+						.end()
+						.as("adType"),
+				);
+				groupBy.push({ key: `camp."adProduct"`, expr: ksql.ref("camp.adProduct") });
+				groupBy.push({ key: `ad."adType"`, expr: ksql.ref("ad.adType") });
+				groupBy.push({ key: `r."adProduct"`, expr: ksql.ref("r.adProduct") });
+				break;
+			}
+			case "placement":
+				selectExprs.push(ksql.ref<string>("r.placementClassification").as("placement"));
+				groupBy.push({
+					key: `r."placementClassification"`,
+					expr: ksql.ref("r.placementClassification"),
+				});
+				break;
+			case "target":
+				selectExprs.push(ksql.ref<string>("r.target").as("target"));
+				groupBy.push({ key: `r.target`, expr: ksql.ref("r.target") });
+				break;
+			case "adgroup":
+				selectExprs.push(ksql.ref<string>("r.adGroupId").as("adGroupId"));
+				groupBy.push({ key: `r."adGroupId"`, expr: ksql.ref("r.adGroupId") });
+				break;
+			case "country":
+				// marketplaceId -> country code, from the static marketplace constants.
+				selectExprs.push(
+					caseOverRef(
+						"r.marketplaceId",
+						distinctMarketplaces(stores),
+						(s) => s.marketplaceId,
+						(s) => s.countryCode,
+					).as("country"),
+				);
+				groupBy.push(marketplaceIdGroupBy());
+				break;
+			case "store":
+				// Storefront label per marketplace (e.g. Amazon.de). `storeName` here is
+				// built by `resolveStores` from the static marketplace `domainName`, NOT
+				// from `amazon_store."storeName"`.
+				selectExprs.push(
+					caseOverRef(
+						"r.marketplaceId",
+						distinctMarketplaces(stores),
+						(s) => s.marketplaceId,
+						(s) => s.storeName,
+					).as("store"),
+				);
+				groupBy.push(marketplaceIdGroupBy());
+				break;
+			case "merchant":
+				// Seller account: merchantId + its amazon_store name. Both are read out of
+				// `amazon_store`, and both were already bound before this conversion.
+				selectExprs.push(ksql.ref<string>("r.merchantId").as("merchantId"));
+				selectExprs.push(
+					caseOverRef(
+						"r.merchantId",
+						distinctMerchants(stores),
+						(s) => s.merchantId,
+						(s) => s.merchantName,
+					).as("merchantName"),
+				);
+				groupBy.push({ key: `r."merchantId"`, expr: ksql.ref("r.merchantId") });
+				break;
+			case "marketplaceId":
+				selectExprs.push(ksql.ref<string>("r.marketplaceId").as("marketplaceId"));
+				groupBy.push(marketplaceIdGroupBy());
+				break;
+		}
+	}
+
+	return { selectExprs, groupBy };
 }
 
 // ---------------------------------------------------------------------------
@@ -693,247 +870,305 @@ function buildDimSql(
 // ---------------------------------------------------------------------------
 
 // `currency` and `marketplaceId` both come from the static `amazonConstants` marketplace
-// table, never from the DB or from caller text, so they stay interpolated.
-function currencyCaseExpr(stores: ResolvedStore[], alias: string): string {
+// table, never from the DB or from caller text. They were interpolated as quoted SQL
+// literals and are now bound, which is strictly safer; neither form reaches a GROUP BY.
+function currencyCaseExpr(stores: ResolvedStore[]): AliasedExpression<string | null, string> {
 	const currencies = new Set(stores.map((s) => s.currency));
 	if (currencies.size <= 1) {
 		const only = stores[0]?.currency ?? "";
-		return `'${only}' AS "currency"`;
+		return textVal(only).as("currency");
 	}
-	const whenClauses = distinctMarketplaces(stores)
-		.map((s) => `WHEN ${alias}."marketplaceId" = '${s.marketplaceId}' THEN '${s.currency}'`)
-		.join(" ");
-	return `CASE ${whenClauses} END AS "currency"`;
+	return caseOverRef(
+		"r.marketplaceId",
+		distinctMarketplaces(stores),
+		(s) => s.marketplaceId,
+		(s) => s.currency,
+	).as("currency");
 }
 
 // ---------------------------------------------------------------------------
 // Query 1: Advertised + Halo-out (search_asin_placement__byDay)
 // ---------------------------------------------------------------------------
 
-/** A built statement plus the values its `$n` placeholders bind to. */
-interface BuiltQuery {
-	readonly query: string;
-	readonly values: string[];
+/** Which optional LEFT JOINs a statement needs: the dimensions' four, plus the `--filter` one. */
+interface QueryJoins extends DimJoinFlags {
+	/** Added only when the dimensions did not already join `camp`; see `buildQuery1`. */
+	readonly needsCampFiltJoin: boolean;
+}
+
+function queryJoins(plan: DimPlan, filter: FilterExpr | null): QueryJoins {
+	return {
+		needsCampaignJoin: plan.needsCampaignJoin,
+		needsAdJoin: plan.needsAdJoin,
+		needsFamilyJoin: plan.needsFamilyJoin,
+		needsParentAsinJoin: plan.needsParentAsinJoin,
+		needsCampFiltJoin: filter !== null && !plan.needsCampaignJoin,
+	};
+}
+
+/**
+ * The `sb_asin_lookup` CTE: a Sponsored Brands ad's first creative ASIN.
+ *
+ * The store predicate binds BOTH halves of each pair. The string-built version
+ * bound `merchantId` and interpolated `marketplaceId` as a quoted literal.
+ */
+function sbAsinLookup(db: CanonicalDb, stores: ResolvedStore[]) {
+	return db.with("sb_asin_lookup", (qb) =>
+		qb
+			.selectFrom("amzadapi_exports_v1__ad")
+			.select((eb) => [
+				"adId",
+				"marketplaceId",
+				eb.fn.coalesce(
+					jsonbText(eb.ref("creative"), "products", 0, "productId"),
+					jsonbText(eb.ref("creative"), "asins", 0),
+				).as("first_asin"),
+			])
+			.where((eb) =>
+				eb(
+					eb.refTuple("merchantId", "marketplaceId"),
+					"in",
+					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+				)
+			)
+			.where("adProduct", "in", ["SPONSORED_BRANDS", "SPONSORED_BRANDS_VIDEO"]));
+}
+
+/**
+ * Query 1's FROM and its joins.
+ *
+ * `$if` is how a conditional join is written: `.where()` does not change the
+ * builder's type so a plain `if` and a reassignment serve there, but a join
+ * does, and only `$if` keeps the chain assignable. Note that `$if` does NOT add
+ * the joined alias to the outer type — after these calls the table list is still
+ * `r | sb_lookup` — which is why every later reference to `camp`, `ad`, `fam`,
+ * `cat` and `camp_filt` goes through `ksql.ref`. The join predicates INSIDE each
+ * callback are fully checked against `DB`.
+ */
+function query1Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins) {
+	return sbAsinLookup(db, stores)
+		.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as r")
+		.leftJoin("sb_asin_lookup as sb_lookup", (join) =>
+			join
+				.onRef("r.adId", "=", "sb_lookup.adId")
+				.onRef("r.marketplaceId", "=", "sb_lookup.marketplaceId"))
+		.$if(joins.needsCampaignJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__campaign as camp", (join) =>
+				join
+					.onRef("r.campaignId", "=", "camp.campaignId")
+					.onRef("r.merchantId", "=", "camp.merchantId")
+					.onRef("r.marketplaceId", "=", "camp.marketplaceId")))
+		.$if(joins.needsAdJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__ad as ad", (join) =>
+				join
+					.onRef("r.adId", "=", "ad.adId")
+					.onRef("r.merchantId", "=", "ad.merchantId")
+					.onRef("r.marketplaceId", "=", "ad.marketplaceId")))
+		.$if(
+			joins.needsFamilyJoin,
+			(qb) =>
+				qb.leftJoin("brand_config_amazon_asin as fam", (join) => join.on("fam.asin", "=", resolvedAsinExpr())),
+		)
+		.$if(joins.needsParentAsinJoin, (qb) =>
+			qb.leftJoin(
+				"amzspapi_catalog_items_v20220401__catalogitem as cat",
+				(join) => join.on("cat.asin", "=", resolvedAsinExpr()),
+			))
+		.$if(joins.needsCampFiltJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__campaign as camp_filt", (join) =>
+				join
+					.onRef("r.campaignId", "=", "camp_filt.campaignId")
+					.onRef("r.merchantId", "=", "camp_filt.merchantId")
+					.onRef("r.marketplaceId", "=", "camp_filt.marketplaceId")));
 }
 
 function buildQuery1(
+	db: CanonicalDb,
 	stores: ResolvedStore[],
 	range: DateRange,
 	dims: GroupByDim[],
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
-): BuiltQuery {
-	// One accumulator per statement. Placeholders are numbered by allocation order,
-	// which need not match their order in the finished text.
-	const params = createSqlParams();
-	const dimSql = buildDimSql(dims, stores, "r", false, params);
+) {
+	const plan = dimPlan(dims);
 	const productGrain = isProductGrain(dims);
+	// One expression object, reused in the SELECT list, the GROUP BY, the two
+	// optional joins and the `--products` predicate: identical text everywhere.
+	const resolvedAsin = resolvedAsinExpr();
+	const dims1 = buildDimExprs(dims, stores, resolvedAsin);
 
-	// sb_asin_lookup CTE
-	const sbCte = `sb_asin_lookup AS (
-		SELECT "adId", "marketplaceId",
-			COALESCE(
-				"creative"->'products'->0->>'productId',
-				"creative"->'asins'->>0
-			) AS first_asin
-		FROM "amzadapi_exports_v1__ad"
-		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, params)}
-			AND "adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO')
-	)`;
+	const groupByCols: GroupByEntry[] = [];
+	// Currency grouping (for multi-store)
+	if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
+	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
+	groupByCols.push(...dims1.groupBy);
 
-	// SELECT columns
-	const selectCols: string[] = [];
-	selectCols.push(currencyCaseExpr(stores, "r"));
-	if (timeUnit) selectCols.push(...timeUnitSelectExprs(timeUnit));
-	selectCols.push(...dimSql.selectExprs);
-
-	// Advertised metrics
-	selectCols.push(
-		`SUM(r.impressions) AS "impressions"`,
-		`SUM(r.clicks) AS "clicks"`,
-		`SUM(r."addToCart") AS "addToCart"`,
-		`SUM(r.purchases) AS "purchases"`,
-		`SUM(r."unitsSold") AS "units"`,
-		`SUM(r."totalCost"::float) AS "spend"`,
-		`SUM(r.sales::float) AS "revenue"`,
-	);
-
-	// Halo-out metrics
-	selectCols.push(
-		`SUM(r."purchasesHalo") AS "purchasesHaloOut"`,
-		`SUM(r."unitsSoldHalo") AS "unitsHaloOut"`,
-		`SUM(r."salesHalo"::float) AS "revenueHaloOut"`,
-	);
-
-	// FROM + JOINs
-	let fromClause = `FROM "amzadapi_reports_v1__search_asin_placement__byDay" r`;
-	fromClause +=
-		`\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
-
-	if (dimSql.needsCampaignJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
-	}
-	if (dimSql.needsAdJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
-	}
-	if (dimSql.needsFamilyJoin) {
-		fromClause += `\nLEFT JOIN brand_config_amazon_asin fam ON fam.asin = ${resolvedAsinExpr()}`;
-	}
-	if (dimSql.needsParentAsinJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExpr()}`;
-	}
-
-	// WHERE
-	const wheres: string[] = [
-		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`, params),
+	let query = query1Base(db, stores, queryJoins(plan, filter))
+		.select((eb) => [
+			currencyCaseExpr(stores),
+			...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
+			...dims1.selectExprs,
+			// Advertised metrics
+			eb.fn.sum<string | null>("r.impressions").as("impressions"),
+			eb.fn.sum<string | null>("r.clicks").as("clicks"),
+			eb.fn.sum<string | null>("r.addToCart").as("addToCart"),
+			eb.fn.sum<string | null>("r.purchases").as("purchases"),
+			eb.fn.sum<string | null>("r.unitsSold").as("units"),
+			// The cast is on the COLUMN, INSIDE the aggregate, as `SUM(r."totalCost"::float)`
+			// was: `cast(sum(...) as float8)` would add `numeric` exactly and round once,
+			// which is a different number in the last bits.
+			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.totalCost"), "float8")).as("spend"),
+			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenue"),
+			// Halo-out metrics
+			eb.fn.sum<string | null>("r.purchasesHalo").as("purchasesHaloOut"),
+			eb.fn.sum<string | null>("r.unitsSoldHalo").as("unitsHaloOut"),
+			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.salesHalo"), "float8")).as("revenueHaloOut"),
+		])
+		.where((eb) =>
+			eb(
+				eb.refTuple("r.merchantId", "r.marketplaceId"),
+				"in",
+				stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+			)
+		)
 		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
-		`r.date >= ${params.add(range.dateFirst)}::date`,
-		`r.date <= ${params.add(range.dateLast)}::date`,
-		sbDoubleCountFilter("r", productGrain),
-	];
+		.where("r.date", ">=", isoDateParam(range.dateFirst))
+		.where("r.date", "<=", isoDateParam(range.dateLast))
+		.where((eb) =>
+			eb.not(eb.and([
+				eb("r.adProduct", "=", "Sponsored Brands"),
+				eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+			]))
+		);
 	if (productAsins) {
 		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
 		// i.e. attacker-writable data — bind every one of them.
-		wheres.push(`${resolvedAsinExpr()} IN (${params.addList(productAsins)})`);
+		query = query.where(resolvedAsin, "in", productAsins);
 	}
 	if (filter) {
 		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
-		if (dimSql.needsCampaignJoin) {
-			wheres.push(`camp.name = ${params.add(filter.value)}`);
-		} else {
-			// Need to add campaign join for filter
-			fromClause +=
-				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
-			wheres.push(`camp_filt.name = ${params.add(filter.value)}`);
-		}
+		query = query.where(
+			ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
+			"=",
+			filter.value,
+		);
 	}
 
-	// GROUP BY
-	const groupByCols: string[] = [];
-	// Currency grouping (for multi-store)
-	if (distinctMarketplaces(stores).length > 1) groupByCols.push(`r."marketplaceId"`);
-	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
-	groupByCols.push(...dimSql.groupByExprs);
-
-	// Deduplicate group by
-	const uniqueGroupBy = [...new Set(groupByCols)];
-
-	return {
-		query: `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
-			wheres.join("\n  AND ")
-		}\nGROUP BY ${uniqueGroupBy.join(", ")}`,
-		values: params.values,
-	};
+	return query.groupBy(dedupeGroupBy(groupByCols)).compile();
 }
 
 // ---------------------------------------------------------------------------
 // Query 2: Halo-in (product01__byDay)
 // ---------------------------------------------------------------------------
 
+/** Query 2's FROM and its joins. See {@link query1Base} for the `$if` reasoning. */
+function query2Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins) {
+	return sbAsinLookup(db, stores)
+		.selectFrom("amzadapi_reports_v1__product01__byDay as r")
+		.leftJoin("sb_asin_lookup as sb_lookup", (join) =>
+			join
+				.onRef("r.adId", "=", "sb_lookup.adId")
+				.onRef("r.marketplaceId", "=", "sb_lookup.marketplaceId"))
+		.$if(joins.needsCampaignJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__campaign as camp", (join) =>
+				join
+					.onRef("r.campaignId", "=", "camp.campaignId")
+					.onRef("r.merchantId", "=", "camp.merchantId")
+					.onRef("r.marketplaceId", "=", "camp.marketplaceId")))
+		.$if(joins.needsAdJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__ad as ad", (join) =>
+				join
+					.onRef("r.adId", "=", "ad.adId")
+					.onRef("r.merchantId", "=", "ad.merchantId")
+					.onRef("r.marketplaceId", "=", "ad.marketplaceId")))
+		// For halo-in, family is on the converted product (the one that received halo)
+		.$if(joins.needsFamilyJoin, (qb) =>
+			qb.leftJoin(
+				"brand_config_amazon_asin as fam",
+				(join) => join.on("fam.asin", "=", resolvedAsinExprProduct01()),
+			))
+		.$if(joins.needsParentAsinJoin, (qb) =>
+			qb.leftJoin(
+				"amzspapi_catalog_items_v20220401__catalogitem as cat",
+				(join) => join.on("cat.asin", "=", resolvedAsinExprProduct01()),
+			))
+		.$if(joins.needsCampFiltJoin, (qb) =>
+			qb.leftJoin("amzadapi_exports_v1__campaign as camp_filt", (join) =>
+				join
+					.onRef("r.campaignId", "=", "camp_filt.campaignId")
+					.onRef("r.merchantId", "=", "camp_filt.merchantId")
+					.onRef("r.marketplaceId", "=", "camp_filt.marketplaceId")));
+}
+
 function buildQuery2(
+	db: CanonicalDb,
 	stores: ResolvedStore[],
 	range: DateRange,
 	dims: GroupByDim[],
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
-): BuiltQuery {
-	// For halo-in, the ASIN is convertedProductId (which product received the halo)
-	// We still need sb_asin_lookup for dimensions that depend on the advertised product
-	// One accumulator per statement — this query's parameters are its own.
-	const params = createSqlParams();
-	const dimSql = buildDimSql(dims, stores, "r", true, params);
+) {
+	// For halo-in, the ASIN is convertedProductId (which product received the halo).
+	// We still need sb_asin_lookup for dimensions that depend on the advertised product.
+	const plan = dimPlan(dims);
 	const productGrain = isProductGrain(dims);
+	const resolvedAsin = resolvedAsinExprProduct01();
+	const dims2 = buildDimExprs(dims, stores, resolvedAsin);
 
-	const sbCte = `sb_asin_lookup AS (
-		SELECT "adId", "marketplaceId",
-			COALESCE(
-				"creative"->'products'->0->>'productId',
-				"creative"->'asins'->>0
-			) AS first_asin
-		FROM "amzadapi_exports_v1__ad"
-		WHERE ${storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, params)}
-			AND "adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO')
-	)`;
+	const groupByCols: GroupByEntry[] = [];
+	if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
+	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
+	groupByCols.push(...dims2.groupBy);
 
-	const selectCols: string[] = [];
-	selectCols.push(currencyCaseExpr(stores, "r"));
-	if (timeUnit) selectCols.push(...timeUnitSelectExprs(timeUnit));
-	selectCols.push(...dimSql.selectExprs);
-
-	// Halo-in metrics
-	selectCols.push(
-		`SUM(r.purchases) AS "purchasesHaloIn"`,
-		`SUM(r."unitsSold") AS "unitsHaloIn"`,
-		`SUM(r.sales::float) AS "revenueHaloIn"`,
-	);
-
-	let fromClause = `FROM "amzadapi_reports_v1__product01__byDay" r`;
-	fromClause +=
-		`\nLEFT JOIN sb_asin_lookup sb_lookup ON r."adId" = sb_lookup."adId" AND r."marketplaceId" = sb_lookup."marketplaceId"`;
-
-	if (dimSql.needsCampaignJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp ON r."campaignId" = camp."campaignId" AND r."merchantId" = camp."merchantId" AND r."marketplaceId" = camp."marketplaceId"`;
-	}
-	if (dimSql.needsAdJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzadapi_exports_v1__ad" ad ON r."adId" = ad."adId" AND r."merchantId" = ad."merchantId" AND r."marketplaceId" = ad."marketplaceId"`;
-	}
-	if (dimSql.needsFamilyJoin) {
-		// For halo-in, family is on the converted product (the one that received halo)
-		fromClause += `\nLEFT JOIN brand_config_amazon_asin fam ON fam.asin = ${resolvedAsinExprProduct01()}`;
-	}
-	if (dimSql.needsParentAsinJoin) {
-		fromClause +=
-			`\nLEFT JOIN "amzspapi_catalog_items_v20220401__catalogitem" cat ON cat.asin = ${resolvedAsinExprProduct01()}`;
-	}
-
-	const wheres: string[] = [
-		storePairsClause(stores, `r."merchantId"`, `r."marketplaceId"`, params),
+	let query = query2Base(db, stores, queryJoins(plan, filter))
+		.select((eb) => [
+			currencyCaseExpr(stores),
+			...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
+			...dims2.selectExprs,
+			// Halo-in metrics
+			eb.fn.sum<string | null>("r.purchases").as("purchasesHaloIn"),
+			eb.fn.sum<string | null>("r.unitsSold").as("unitsHaloIn"),
+			// The cast stays INSIDE the aggregate; see buildQuery1.
+			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenueHaloIn"),
+		])
+		.where((eb) =>
+			eb(
+				eb.refTuple("r.merchantId", "r.marketplaceId"),
+				"in",
+				stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+			)
+		)
 		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
-		`r.date >= ${params.add(range.dateFirst)}::date`,
-		`r.date <= ${params.add(range.dateLast)}::date`,
-		`r."productRelevance" = 'Brand halo'`,
+		.where("r.date", ">=", isoDateParam(range.dateFirst))
+		.where("r.date", "<=", isoDateParam(range.dateLast))
+		.where("r.productRelevance", "=", "Brand halo")
 		// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
 		// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
 		// is populated on both the aggregate and per-ASIN rows, so grain is driven by the
 		// requested dims, not by which column this query keys on).
-		sbDoubleCountFilter("r", productGrain),
-	];
+		.where((eb) =>
+			eb.not(eb.and([
+				eb("r.adProduct", "=", "Sponsored Brands"),
+				eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+			]))
+		);
 	if (productAsins) {
 		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
 		// i.e. attacker-writable data — bind every one of them.
-		wheres.push(`${resolvedAsinExprProduct01()} IN (${params.addList(productAsins)})`);
+		query = query.where(resolvedAsin, "in", productAsins);
 	}
 	if (filter) {
 		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
-		if (dimSql.needsCampaignJoin) {
-			wheres.push(`camp.name = ${params.add(filter.value)}`);
-		} else {
-			fromClause +=
-				`\nLEFT JOIN "amzadapi_exports_v1__campaign" camp_filt ON r."campaignId" = camp_filt."campaignId" AND r."merchantId" = camp_filt."merchantId" AND r."marketplaceId" = camp_filt."marketplaceId"`;
-			wheres.push(`camp_filt.name = ${params.add(filter.value)}`);
-		}
+		query = query.where(
+			ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
+			"=",
+			filter.value,
+		);
 	}
 
-	const groupByCols: string[] = [];
-	if (distinctMarketplaces(stores).length > 1) groupByCols.push(`r."marketplaceId"`);
-	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
-	groupByCols.push(...dimSql.groupByExprs);
-
-	const uniqueGroupBy = [...new Set(groupByCols)];
-
-	return {
-		query: `WITH ${sbCte}\nSELECT\n  ${selectCols.join(",\n  ")}\n${fromClause}\nWHERE ${
-			wheres.join("\n  AND ")
-		}\nGROUP BY ${uniqueGroupBy.join(", ")}`,
-		values: params.values,
-	};
+	return query.groupBy(dedupeGroupBy(groupByCols)).compile();
 }
 
 // ---------------------------------------------------------------------------
@@ -955,10 +1190,9 @@ function mergeResults(
 	// Build key columns: currency + timeUnit cols + dimension output cols
 	const keyCols = ["currency"];
 	if (timeUnit) keyCols.push(...TIME_UNIT_OUTPUT_COLS);
-	// Only `outputCols` is wanted here; the SQL fragments (and any parameters this
-	// would allocate) are discarded, so the accumulator is a throwaway.
-	const dimSqlRef = buildDimSql(dims, [], "r", false, createSqlParams());
-	keyCols.push(...dimSqlRef.outputCols);
+	// Only the output column NAMES are wanted here; the expressions (and the
+	// parameters they would bind) are the query builders' business.
+	keyCols.push(...dimPlan(dims).outputCols);
 
 	// Pre-aggregate: SQL groups by raw camp/ad/r columns, but the CASE
 	// expressions (e.g. adType) collapse multiple raw groups into one output
@@ -1140,6 +1374,10 @@ export async function loadAds(
 	if (!params.when) fail("--when is required");
 	if (!params.groupBy) fail("--groupBy is required");
 
+	// One builder for the whole invocation, built before anything is assembled: it
+	// is where a future `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
+
 	// Resolve stores (merchant <-> marketplace mapping comes from amazon_store)
 	const stores = await resolveStores(params.stores, sql);
 
@@ -1183,26 +1421,28 @@ export async function loadAds(
 	}
 
 	// Get latest data date for the resolved stores
-	const latestParams = createSqlParams();
-	const latestWhere = storePairsClause(stores, `"merchantId"`, `"marketplaceId"`, latestParams);
-	const latestRow = await sql.unsafe<Array<{ latest: string | null }>>(
-		`
-		SELECT MAX(date)::text AS latest
-		FROM "amzadapi_reports_v1__search_asin_placement__byDay"
-		WHERE ${latestWhere}
-	`,
-		latestParams.values,
+	const latestRow = await runCompiled(
+		sql,
+		db
+			.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+			.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
+			.where((eb) =>
+				eb(
+					eb.refTuple("merchantId", "marketplaceId"),
+					"in",
+					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+				)
+			)
+			.compile(),
 	);
 	const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
 
-	// Build and run queries. Each carries its own bind values; a non-empty values array
-	// also puts these on the extended protocol, where stacked statements are rejected.
-	const q1Sql = buildQuery1(stores, range, groupByDims, timeUnit, productAsins, filter);
-	const q2Sql = buildQuery2(stores, range, groupByDims, timeUnit, productAsins, filter);
-
+	// Build and run both statements. Each compiles its own parameter list, and a
+	// non-empty list also puts them on the extended protocol, where stacked
+	// statements are rejected.
 	const [q1Rows, q2Rows] = await Promise.all([
-		sql.unsafe<Record<string, unknown>[]>(q1Sql.query, q1Sql.values),
-		sql.unsafe<Record<string, unknown>[]>(q2Sql.query, q2Sql.values),
+		runCompiled(sql, buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
+		runCompiled(sql, buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
 	]);
 
 	// Merge results

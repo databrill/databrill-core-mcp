@@ -36,7 +36,7 @@ export interface McpTool {
 /**
  * Whether a tool reads or writes. DECLARED by the tool, never inferred from its
  * name, so a frontend can route each call to a different connection without
- * matching on names — the one seam where read/write routing is enforceable.
+ * matching on names — the one place where read/write routing is enforceable.
  * Absent means `"read"`.
  */
 export type McpToolAccess = "read" | "write";

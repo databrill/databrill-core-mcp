@@ -8,8 +8,12 @@
  */
 
 import type postgres from "postgres";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { sql as ksql } from "kysely";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { groupByWith } from "../../groupByWith.ts";
+import { isoDateParam, runCompiled } from "../../runCompiled.ts";
+import { jsonbText } from "../../sqlJson.ts";
 import { summarizeAdMetrics } from "../../summarizeAdMetrics.ts";
 
 export const SB_RESIDUAL_FIRST_ASIN = "SB_RESIDUAL_FIRST_ASIN";
@@ -28,26 +32,6 @@ export interface FamilyAgg {
 	readonly totalSales: number;
 }
 
-interface AdRow {
-	readonly merchantId: string;
-	readonly marketplaceId: string;
-	readonly family: string;
-	readonly source: string | null;
-	readonly adImpressions: string | number | null;
-	readonly adClicks: string | number | null;
-	readonly adOrders: string | number | null;
-	readonly adUnits: string | number | null;
-	readonly adSpend: string | number | null;
-	readonly adSales: string | number | null;
-}
-
-interface SalesRow {
-	readonly merchantId: string;
-	readonly marketplaceId: string;
-	readonly family: string;
-	readonly totalSales: string | number | null;
-}
-
 function siteOf(marketplaceId: string): string | null {
 	return marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? null;
 }
@@ -61,112 +45,203 @@ export async function loadFamilyWindow(
 	merchantIds: string[],
 	since: string,
 ): Promise<FamilyAgg[]> {
-	const adRows = await sql<AdRow[]>`
-		WITH sb_asin_lookup AS (
-			SELECT "merchantId", "marketplaceId", "adId",
-				COALESCE(
-					"creative"->'products'->0->>'productId',
-					"creative"->'asins'->>0
-				) AS first_asin
-			FROM "amzadapi_exports_v1__ad"
-			WHERE "merchantId" = ANY(${merchantIds})
-				AND "adProduct" IN ('SPONSORED_BRANDS', 'SPONSORED_BRANDS_VIDEO')
-		),
-		certain AS (
-			SELECT ad."merchantId", ad."marketplaceId",
-				COALESCE(bca."family", '(unmapped)') AS family,
-				NULL::text AS source,
-				SUM(ad."impressions")::numeric AS "adImpressions",
-				SUM(ad."clicks")::numeric AS "adClicks",
-				SUM(ad."purchases")::numeric AS "adOrders",
-				SUM(ad."unitsSold")::numeric AS "adUnits",
-				SUM(ad."totalCost")::numeric AS "adSpend",
-				SUM(ad."sales")::numeric AS "adSales"
-			FROM "amzadapi_reports_v1__search_asin_placement__byDay" ad
-			LEFT JOIN "brand_config_amazon_asin" bca
-				ON bca."asin" = ad."advertisedProductId"
-			WHERE ad."merchantId" = ANY(${merchantIds})
-				AND ad."date" >= ${since}
-				AND ad."advertisedProductId" <> ''
-			GROUP BY ad."merchantId", ad."marketplaceId",
-				COALESCE(bca."family", '(unmapped)')
-		),
-		sb_by_ad AS (
-			SELECT ad."merchantId", ad."marketplaceId", ad."adId",
-				(
-					COALESCE(SUM(ad."impressions") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."impressions") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_impressions,
-				(
-					COALESCE(SUM(ad."clicks") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."clicks") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_clicks,
-				(
-					COALESCE(SUM(ad."purchases") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."purchases") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_orders,
-				(
-					COALESCE(SUM(ad."unitsSold") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."unitsSold") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_units,
-				(
-					COALESCE(SUM(ad."totalCost") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."totalCost") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_spend,
-				(
-					COALESCE(SUM(ad."sales") FILTER (WHERE ad."advertisedProductId" = ''), 0)
-						- COALESCE(SUM(ad."sales") FILTER (WHERE ad."advertisedProductId" <> ''), 0)
-				)::numeric AS residual_sales
-			FROM "amzadapi_reports_v1__search_asin_placement__byDay" ad
-			WHERE ad."merchantId" = ANY(${merchantIds})
-				AND ad."date" >= ${since}
-				AND ad."adProduct" = 'Sponsored Brands'
-			GROUP BY ad."merchantId", ad."marketplaceId", ad."adId"
-		),
-		guessed AS (
-			SELECT sb."merchantId", sb."marketplaceId",
-				COALESCE(bca."family", '(unmapped)') AS family,
-				${SB_RESIDUAL_FIRST_ASIN}::text AS source,
-				SUM(sb.residual_impressions)::numeric AS "adImpressions",
-				SUM(sb.residual_clicks)::numeric AS "adClicks",
-				SUM(sb.residual_orders)::numeric AS "adOrders",
-				SUM(sb.residual_units)::numeric AS "adUnits",
-				SUM(sb.residual_spend)::numeric AS "adSpend",
-				SUM(sb.residual_sales)::numeric AS "adSales"
-			FROM sb_by_ad sb
-			LEFT JOIN sb_asin_lookup lookup
-				ON lookup."merchantId" = sb."merchantId"
-				AND lookup."marketplaceId" = sb."marketplaceId"
-				AND lookup."adId" = sb."adId"
-			LEFT JOIN "brand_config_amazon_asin" bca
-				ON bca."asin" = lookup.first_asin
-			WHERE sb.residual_impressions <> 0
-				OR sb.residual_clicks <> 0
-				OR sb.residual_orders <> 0
-				OR sb.residual_units <> 0
-				OR sb.residual_spend <> 0
-				OR sb.residual_sales <> 0
-			GROUP BY sb."merchantId", sb."marketplaceId",
-				COALESCE(bca."family", '(unmapped)')
-		)
-		SELECT "merchantId", "marketplaceId", family, source,
-			"adImpressions", "adClicks", "adOrders", "adUnits", "adSpend", "adSales"
-		FROM certain
-		UNION ALL
-		SELECT "merchantId", "marketplaceId", family, source,
-			"adImpressions", "adClicks", "adOrders", "adUnits", "adSpend", "adSales"
-		FROM guessed
-	`;
-	const salesRows = await sql<SalesRow[]>`
-		SELECT ao."merchant_id" AS "merchantId", ao."marketplace_id" AS "marketplaceId",
-			COALESCE(bca."family", '(unmapped)') AS "family",
-			SUM(ao."item_price" - COALESCE(ao."item_promotion_discount", 0))::numeric AS "totalSales"
-		FROM "amzreport_ALL_ORDERS" ao
-		LEFT JOIN "brand_config_amazon_asin" bca ON bca."asin" = ao."asin"
-		WHERE ao."merchant_id" = ANY(${merchantIds}) AND ao."localdate" >= ${since}
-			AND ao."order_status" != 'Cancelled'
-		GROUP BY ao."merchant_id", ao."marketplace_id", COALESCE(bca."family", '(unmapped)')
-	`;
+	// One builder per invocation; it is where a future `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
+
+	const adRows = await runCompiled(
+		sql,
+		db
+			.with("sb_asin_lookup", (qb) =>
+				qb
+					.selectFrom("amzadapi_exports_v1__ad")
+					.select((eb) => [
+						"merchantId",
+						"marketplaceId",
+						"adId",
+						eb.fn.coalesce(
+							jsonbText(eb.ref("creative"), "products", 0, "productId"),
+							jsonbText(eb.ref("creative"), "asins", 0),
+						).as("first_asin"),
+					])
+					.where((eb) => eb("merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+					.where("adProduct", "in", ["SPONSORED_BRANDS", "SPONSORED_BRANDS_VIDEO"]))
+			.with("certain", (qb) =>
+				qb
+					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as ad")
+					.leftJoin("brand_config_amazon_asin as bca", "bca.asin", "ad.advertisedProductId")
+					.select((eb) => [
+						"ad.merchantId",
+						"ad.marketplaceId",
+						// `sql.lit`, not `eb.val`: this COALESCE is in both the SELECT list and
+						// the GROUP BY, and Postgres matches those by parse-tree equality, so two
+						// placeholders for the same literal would be rejected at runtime.
+						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+						eb.cast<string | null>(eb.val<string | null>(null), "text").as("source"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.impressions"), "numeric").as(
+							"adImpressions",
+						),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.clicks"), "numeric").as("adClicks"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.purchases"), "numeric").as("adOrders"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.unitsSold"), "numeric").as("adUnits"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.totalCost"), "numeric").as("adSpend"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("ad.sales"), "numeric").as("adSales"),
+					])
+					.where((eb) => eb("ad.merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+					.where("ad.date", ">=", isoDateParam(since))
+					.where("ad.advertisedProductId", "<>", "")
+					.groupBy((eb) => [
+						"ad.merchantId",
+						"ad.marketplaceId",
+						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+					]))
+			.with("sb_by_ad", (qb) =>
+				qb
+					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as ad")
+					.select((eb) => {
+						function residual(
+							column: "impressions" | "clicks" | "purchases" | "unitsSold" | "totalCost" | "sales",
+						) {
+							return eb.cast<string>(
+								eb(
+									eb.fn.coalesce(
+										eb.fn.sum<string>(`ad.${column}`).filterWhere(
+											"ad.advertisedProductId",
+											"=",
+											"",
+										),
+										ksql.lit(0),
+									),
+									"-",
+									eb.fn.coalesce(
+										eb.fn.sum<string>(`ad.${column}`).filterWhere(
+											"ad.advertisedProductId",
+											"<>",
+											"",
+										),
+										ksql.lit(0),
+									),
+								),
+								"numeric",
+							);
+						}
+						return [
+							"ad.merchantId",
+							"ad.marketplaceId",
+							"ad.adId",
+							residual("impressions").as("residual_impressions"),
+							residual("clicks").as("residual_clicks"),
+							residual("purchases").as("residual_orders"),
+							residual("unitsSold").as("residual_units"),
+							residual("totalCost").as("residual_spend"),
+							residual("sales").as("residual_sales"),
+						];
+					})
+					.where((eb) => eb("ad.merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+					.where("ad.date", ">=", isoDateParam(since))
+					.where("ad.adProduct", "=", "Sponsored Brands")
+					.groupBy(["ad.merchantId", "ad.marketplaceId", "ad.adId"]))
+			.with("guessed", (qb) =>
+				qb
+					.selectFrom("sb_by_ad as sb")
+					.leftJoin("sb_asin_lookup as lookup", (join) =>
+						join
+							.onRef("lookup.merchantId", "=", "sb.merchantId")
+							.onRef("lookup.marketplaceId", "=", "sb.marketplaceId")
+							.onRef("lookup.adId", "=", "sb.adId"))
+					.leftJoin("brand_config_amazon_asin as bca", "bca.asin", "lookup.first_asin")
+					.select((eb) => [
+						"sb.merchantId",
+						"sb.marketplaceId",
+						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+						eb.cast<string>(eb.val(SB_RESIDUAL_FIRST_ASIN), "text").as("source"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_impressions"), "numeric")
+							.as("adImpressions"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_clicks"), "numeric").as(
+							"adClicks",
+						),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_orders"), "numeric").as(
+							"adOrders",
+						),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_units"), "numeric").as("adUnits"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_spend"), "numeric").as("adSpend"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_sales"), "numeric").as("adSales"),
+					])
+					.where((eb) =>
+						eb.or([
+							// The CTE columns are `numeric` (typed `string`), so `sql.lit(0)` — a
+							// `RawBuilder<number>` — is rejected. `sql.raw` emits the bare `0` the
+							// original has; it receives a source-code literal, never caller data.
+							eb("sb.residual_impressions", "<>", ksql.raw<string>("0")),
+							eb("sb.residual_clicks", "<>", ksql.raw<string>("0")),
+							eb("sb.residual_orders", "<>", ksql.raw<string>("0")),
+							eb("sb.residual_units", "<>", ksql.raw<string>("0")),
+							eb("sb.residual_spend", "<>", ksql.raw<string>("0")),
+							eb("sb.residual_sales", "<>", ksql.raw<string>("0")),
+						])
+					)
+					.groupBy((eb) => [
+						"sb.merchantId",
+						"sb.marketplaceId",
+						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+					]))
+			.selectFrom("certain")
+			.select([
+				"merchantId",
+				"marketplaceId",
+				"family",
+				"source",
+				"adImpressions",
+				"adClicks",
+				"adOrders",
+				"adUnits",
+				"adSpend",
+				"adSales",
+			])
+			.unionAll((eb) =>
+				eb.selectFrom("guessed").select([
+					"merchantId",
+					"marketplaceId",
+					"family",
+					"source",
+					"adImpressions",
+					"adClicks",
+					"adOrders",
+					"adUnits",
+					"adSpend",
+					"adSales",
+				])
+			)
+			.compile(),
+	);
+	const salesRows = await runCompiled(
+		sql,
+		db
+			.selectFrom("amzreport_ALL_ORDERS as ao")
+			.leftJoin("brand_config_amazon_asin as bca", "bca.asin", "ao.asin")
+			.select((eb) => [
+				eb.ref("ao.merchant_id").as("merchantId"),
+				eb.ref("ao.marketplace_id").as("marketplaceId"),
+				eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+				// An aggregate over an arithmetic expression has no builder form:
+				// `eb.fn.sum(eb("item_price", "-", eb.fn.coalesce(...)))` fails with
+				// "Property 'isSelectQueryBuilder' is missing in type 'ExpressionWrapper<…>'".
+				eb.cast<string | null>(
+					eb.fn.sum<string | null>(
+						ksql<number>`${eb.ref("ao.item_price")} - COALESCE(${eb.ref("ao.item_promotion_discount")}, 0)`,
+					),
+					"numeric",
+				).as("totalSales"),
+			])
+			.where((eb) => eb("ao.merchant_id", "=", eb.fn.any(ksql.val(merchantIds))))
+			.where("ao.localdate", ">=", isoDateParam(since))
+			.where("ao.order_status", "!=", "Cancelled")
+			.groupBy((eb) => [
+				"ao.merchant_id",
+				"ao.marketplace_id",
+				eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+			])
+			.compile(),
+	);
 
 	const definitiveContributions: FamilyAgg[] = [];
 	const guessed: FamilyAgg[] = [];

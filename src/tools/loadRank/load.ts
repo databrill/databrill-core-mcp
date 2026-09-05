@@ -7,6 +7,8 @@
  */
 
 import postgres from "postgres";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { runCompiled } from "../../runCompiled.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import type { LoadRankParams, LoadRankResult, RankPoint } from "./types.ts";
 
@@ -46,6 +48,10 @@ export async function loadRank(params: LoadRankParams, sql: postgres.Sql): Promi
 	`;
 	const hasBrowseNode = browseRows[0]?.exists === true;
 
+	// One builder for the whole invocation: it is where a future
+	// `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
+
 	const data: RankPoint[] = [];
 	const present: string[] = [];
 	const missing: string[] = [];
@@ -72,11 +78,20 @@ export async function loadRank(params: LoadRankParams, sql: postgres.Sql): Promi
 		const numeric = [...new Set(rows.map((r) => String(r.category)).filter((c) => /^\d+$/.test(c)))];
 		const nameMap = new Map<string, string>();
 		if (hasBrowseNode && numeric.length > 0) {
-			const ids = numeric.map((c) => Number(c));
-			const nameRows = await sql<Array<{ id: string; name: string }>>`
-				SELECT id::text AS id, name FROM amazon_browse_node
-				WHERE marketplace_code = ${country} AND id IN ${sql(ids)}
-			`;
+			// The digit STRINGS are bound, not `Number(...)`: `amazon_browse_node.id`
+			// is `int8`, whose select type is `string`, so a `number[]` operand does
+			// not type-check. Nothing changes on the wire — postgres.js infers OID 0
+			// (unspecified) for both a number and a string, and Postgres resolves it
+			// against the `int8` column either way.
+			const nameRows = await runCompiled(
+				sql,
+				db
+					.selectFrom("amazon_browse_node")
+					.select((eb) => [eb.cast<string>(eb.ref("id"), "text").as("id"), "name"])
+					.where("marketplace_code", "=", country)
+					.where("id", "in", numeric)
+					.compile(),
+			);
 			for (const nr of nameRows) nameMap.set(nr.id, nr.name);
 		}
 

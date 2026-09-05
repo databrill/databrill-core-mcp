@@ -3,9 +3,8 @@
  *   bun run bin/cli.ts salesDropDiagnosis --all-stores --format json
  *   deno run -A bin/cli.ts salesDropDiagnosis --stores DE,US
  *
- * Same `(config, sql)` core as the MCP tool. Connection: a single POSTGRES_URL,
- * or — when DATABRILL_CONFIG is set — the workspace picked by `--wsid` (or
- * inferred from `--stores`), matching the MCP server's routing.
+ * Same `(config, sql)` core as the MCP tool. `DATABRILL_CONFIG` maps the
+ * required `--wsid` to that workspace's own credential.
  */
 
 import "temporal-polyfill/global";
@@ -16,7 +15,6 @@ import { Effect, Option } from "effect";
 import type { Sql } from "postgres";
 import {
 	loadConfig,
-	loadSingleWorkspaceFeatures,
 	resolveWorkspace,
 	SQL_FEATURE,
 	SQL_WRITE_FEATURE,
@@ -39,36 +37,26 @@ import { load } from "../src/tools/salesDropDiagnosis/load.ts";
 import { render } from "../src/tools/salesDropDiagnosis/render.ts";
 import type { OutputFormat } from "../src/tools/salesDropDiagnosis/types.ts";
 
-const config = loadConfig();
-const singleWorkspaceFeatures = loadSingleWorkspaceFeatures();
+const loadedConfig = loadConfig();
+if (loadedConfig === null) {
+	throw new Error("DATABRILL_CONFIG is required; unscoped POSTGRES_URL mode is not supported");
+}
+const config = loadedConfig;
 const provider = createSqlProvider(config);
 
-/** Shared `--wsid` option. Only meaningful with DATABRILL_CONFIG; ignored otherwise. */
+/** Shared required `--wsid` option. */
 const wsidOption = Options.text("wsid").pipe(
-	Options.withDescription("Workspace id — needed only with DATABRILL_CONFIG when the stores span workspaces"),
-	Options.optional,
+	Options.withDescription("Workspace id (required for every data command)"),
 );
 
-/** Resolve the connection for a command from its `--wsid` and `--stores` options. */
-function resolveSql(o: { wsid: Option.Option<string>; stores?: unknown }): Sql {
-	const stores = typeof o.stores === "string"
-		? o.stores
-		: Option.isOption(o.stores)
-		? Option.getOrUndefined(o.stores)
-		: undefined;
-	return provider.getSqlForArgs({ wsid: Option.getOrUndefined(o.wsid), stores });
+/** Resolve the connection for a command from its explicit `--wsid`. */
+function resolveSql(o: { wsid: string }): Promise<Sql> {
+	return provider.getSqlForArgs({ wsid: o.wsid });
 }
 
-function resolveFeatureSql(o: { wsid: Option.Option<string>; stores?: unknown }, feature: string): Sql {
-	const stores = typeof o.stores === "string"
-		? o.stores
-		: Option.isOption(o.stores)
-		? Option.getOrUndefined(o.stores)
-		: undefined;
-	const args = { wsid: Option.getOrUndefined(o.wsid), stores };
-	const enabled = config === null
-		? singleWorkspaceFeatures[feature] === true
-		: workspaceHasFeature(resolveWorkspace(config, args), feature);
+function resolveFeatureSql(o: { wsid: string }, feature: string): Promise<Sql> {
+	const args = { wsid: o.wsid };
+	const enabled = workspaceHasFeature(resolveWorkspace(config, args), feature);
 	if (!enabled) {
 		throw new Error(`This command requires the workspace feature "${feature}"`);
 	}
@@ -98,7 +86,7 @@ const loadAdsCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadAds({
@@ -146,7 +134,7 @@ const salesDropDiagnosis = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			const storesRaw = Option.getOrUndefined(o.stores);
 			try {
 				const rows = yield* load({
@@ -182,7 +170,7 @@ const loadTrafficCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadTraffic({
@@ -214,7 +202,7 @@ const loadSqpCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadSqp({
@@ -244,7 +232,7 @@ const loadRankCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadRank({ stores: o.stores, when: o.when, products: Option.getOrUndefined(o.products) }, sql)
@@ -272,7 +260,7 @@ const loadEconomicsCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const econRaw = Option.getOrUndefined(o.economics);
 				const result = yield* Effect.promise(() =>
@@ -307,7 +295,7 @@ const inventoryPacingCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveSql(o);
+			const sql = yield* Effect.promise(() => resolveSql(o));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadInventoryPacing({
@@ -349,7 +337,7 @@ const loadTflInventoryCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveFeatureSql(o, TFL_INVENTORY_FEATURE);
+			const sql = yield* Effect.promise(() => resolveFeatureSql(o, TFL_INVENTORY_FEATURE));
 			try {
 				const result = yield* Effect.promise(() =>
 					loadTflInventory({
@@ -372,7 +360,7 @@ const listTablesCommand = Command.make(
 	{ wsid: wsidOption },
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveFeatureSql(o, SQL_FEATURE);
+			const sql = yield* Effect.promise(() => resolveFeatureSql(o, SQL_FEATURE));
 			try {
 				const result = yield* Effect.promise(() => listTables(sql));
 				console.log(JSON.stringify(result, null, "\t"));
@@ -392,7 +380,7 @@ const describeTableCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const sql = resolveFeatureSql(o, SQL_FEATURE);
+			const sql = yield* Effect.promise(() => resolveFeatureSql(o, SQL_FEATURE));
 			try {
 				const result = yield* Effect.promise(() => describeTable({ table: o.table }, sql));
 				console.log(JSON.stringify(result, null, "\t"));
@@ -414,7 +402,7 @@ const executeSqlCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const client = resolveFeatureSql(o, SQL_FEATURE);
+			const client = yield* Effect.promise(() => resolveFeatureSql(o, SQL_FEATURE));
 			try {
 				const result = yield* Effect.promise(() =>
 					executeSql({ sql: o.sql, limit: Option.getOrUndefined(o.limit) }, client)
@@ -434,7 +422,7 @@ const writeSqlCommand = Command.make(
 	},
 	(o) =>
 		Effect.gen(function* () {
-			const client = resolveFeatureSql(o, SQL_WRITE_FEATURE);
+			const client = yield* Effect.promise(() => resolveFeatureSql(o, SQL_WRITE_FEATURE));
 			try {
 				const result = yield* Effect.promise(() => writeSql({ sql: o.sql }, client));
 				console.log(JSON.stringify(result, null, "\t"));
@@ -461,7 +449,7 @@ const root = Command.make("core-mcp").pipe(
 	]),
 );
 
-const cli = Command.run(root, { name: "core-mcp", version: "0.2.2" });
+const cli = Command.run(root, { name: "core-mcp", version: "0.2.3" });
 
 cli(process.argv).pipe(
 	Effect.provide(NodeContext.layer),

@@ -15,8 +15,9 @@
  * aggregate in two levels: a CTE at the market grain (`MAX` on the `total*`
  * columns, `SUM` on the `asin*` ones), then an outer roll-up that sums both
  * across search queries, periods and marketplaces as the output grain requires.
- * Summing the `total*` columns directly inflated every share this tool reported
- * by the number of our ASINs ranking for each term — 6x to 80x on real data.
+ * Summing the `total*` columns directly multiplies the market denominator by the
+ * number of our ASINs ranking for each term, so every share this tool reports
+ * comes out smaller than the truth by that same factor.
  *
  * The `products` filter stays inside the CTE, so a term the filtered ASIN set
  * does not appear on drops out of the denominator too: the market total means
@@ -30,13 +31,15 @@
  *     GROUP BY "searchQuery", "marketplaceId", "dateFirst"
  *     HAVING count(DISTINCT ("impressionData"->>'totalQueryImpressionCount')) > 1
  *   ) t;
- * Zero is the expected answer (confirmed over 64,409 groups of the largest
- * workspace). A non-zero count means two report vintages are in the table — fix
- * the data, do not switch to `AVG`, which would hide it.
+ * Zero is the expected answer. A non-zero count means two report vintages are in
+ * the table — fix the data, do not switch to `AVG`, which would hide it.
  */
 
-import postgres from "postgres";
+import type postgres from "postgres";
+import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
+import { isoDateParam, runCompiled } from "../../runCompiled.ts";
+import { jsonbInt } from "../../sqlJson.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import {
 	type LoadSqpParams,
@@ -78,58 +81,75 @@ export async function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Promise
 		asins = await resolveProducts(params.products, sql);
 		if (asins.length === 0) fail("products resolved to zero ASINs");
 	}
-	const asinFilter = asins ? sql`AND asin IN ${sql(asins)}` : sql``;
+	// One builder for the whole invocation, built before the CTE: it is where a
+	// future `.withSchema(workspaceSchema)` would attach.
+	const db = createCanonicalQueryBuilder();
 
-	const periodRows = await sql<Array<Record<string, string | null>>>`
-		WITH per_query AS (
-			SELECT
-				"marketplaceId",
-				"dateFirst",
-				"searchQuery",
-				SUM(("impressionData"->>'asinImpressionCount')::int) AS our_impr,
-				SUM(("clickData"->>'asinClickCount')::int) AS our_clicks,
-				SUM(("purchaseData"->>'asinPurchaseCount')::int) AS our_purch,
-				-- The total* columns are whole-market figures that the report repeats
-				-- identically on every ASIN row of a (searchQuery, marketplaceId,
-				-- dateFirst) group. MAX reads that single value; SUM would multiply it
-				-- by the number of our ASINs that happen to rank for the term.
-				MAX(("impressionData"->>'totalQueryImpressionCount')::int) AS market_impr,
-				MAX(("clickData"->>'totalClickCount')::int) AS market_clicks,
-				MAX(("purchaseData"->>'totalPurchaseCount')::int) AS market_purch
-			FROM "amzreport_SEARCH_QUERY_PERFORMANCE"
-			WHERE "timeUnit" = ${timeUnit}
-				AND "marketplaceId" IN ${sql(marketplaceIds)}
-				${asinFilter}
-				AND "dateFirst"::date >= ${range.dateFirst}::date
-				AND "dateFirst"::date <= ${range.dateLast}::date
-			GROUP BY "marketplaceId", "dateFirst", "searchQuery"
-		)
-		SELECT
+	// The market-grain CTE, shared by both statements below. The two original
+	// templates spelled its GROUP BY in a different column ORDER, which does not
+	// affect the result, so one builder serves both; each statement compiles its
+	// own copy of the CTE text with its own placeholder numbering.
+	let perQuery = db
+		.selectFrom("amzreport_SEARCH_QUERY_PERFORMANCE")
+		.select((eb) => [
 			"marketplaceId",
-			"dateFirst"::date::text AS period,
-			SUM(our_impr) AS our_impr,
-			SUM(market_impr) AS market_impr,
-			SUM(our_clicks) AS our_clicks,
-			SUM(market_clicks) AS market_clicks,
-			SUM(our_purch) AS our_purch,
-			SUM(market_purch) AS market_purch
-		FROM per_query
-		GROUP BY "marketplaceId", "dateFirst"
-		ORDER BY "dateFirst", "marketplaceId"
-	`;
+			"dateFirst",
+			"searchQuery",
+			eb.fn.sum<string | null>(jsonbInt(eb.ref("impressionData"), "asinImpressionCount")).as("our_impr"),
+			eb.fn.sum<string | null>(jsonbInt(eb.ref("clickData"), "asinClickCount")).as("our_clicks"),
+			eb.fn.sum<string | null>(jsonbInt(eb.ref("purchaseData"), "asinPurchaseCount")).as("our_purch"),
+			// MAX, not SUM: the total* columns are whole-market figures that the
+			// report repeats identically on every ASIN row of a (searchQuery,
+			// marketplaceId, dateFirst) group. MAX reads that single value; SUM
+			// would multiply it by the number of our ASINs that happen to rank for
+			// the term.
+			eb.fn.max<number | null>(jsonbInt(eb.ref("impressionData"), "totalQueryImpressionCount")).as("market_impr"),
+			eb.fn.max<number | null>(jsonbInt(eb.ref("clickData"), "totalClickCount")).as("market_clicks"),
+			eb.fn.max<number | null>(jsonbInt(eb.ref("purchaseData"), "totalPurchaseCount")).as("market_purch"),
+		])
+		.where("timeUnit", "=", timeUnit)
+		.where("marketplaceId", "in", marketplaceIds)
+		.where("dateFirst", ">=", isoDateParam(range.dateFirst))
+		.where("dateFirst", "<=", isoDateParam(range.dateLast))
+		.groupBy(["marketplaceId", "dateFirst", "searchQuery"]);
+	// The products filter stays INSIDE the CTE — see the module doc.
+	if (asins !== null) {
+		perQuery = perQuery.where("asin", "in", asins);
+	}
+
+	const periodRows = await runCompiled(
+		sql,
+		db
+			.with("per_query", () => perQuery)
+			.selectFrom("per_query")
+			.select((eb) => [
+				"marketplaceId",
+				eb.cast<string>(eb.ref("dateFirst"), "text").as("period"),
+				eb.fn.sum<string | null>("our_impr").as("our_impr"),
+				eb.fn.sum<string | null>("market_impr").as("market_impr"),
+				eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
+				eb.fn.sum<string | null>("market_clicks").as("market_clicks"),
+				eb.fn.sum<string | null>("our_purch").as("our_purch"),
+				eb.fn.sum<string | null>("market_purch").as("market_purch"),
+			])
+			.groupBy(["marketplaceId", "dateFirst"])
+			.orderBy("dateFirst")
+			.orderBy("marketplaceId")
+			.compile(),
+	);
 
 	const periods: SqpPeriodRow[] = periodRows.map((r) => {
-		const marketplaceId = String(r["marketplaceId"]);
-		const ourImpr = Number(r["our_impr"] ?? 0);
-		const marketImpr = Number(r["market_impr"] ?? 0);
-		const ourClicks = Number(r["our_clicks"] ?? 0);
-		const marketClicks = Number(r["market_clicks"] ?? 0);
-		const ourPurchases = Number(r["our_purch"] ?? 0);
-		const marketPurchases = Number(r["market_purch"] ?? 0);
+		const marketplaceId = String(r.marketplaceId);
+		const ourImpr = Number(r.our_impr ?? 0);
+		const marketImpr = Number(r.market_impr ?? 0);
+		const ourClicks = Number(r.our_clicks ?? 0);
+		const marketClicks = Number(r.market_clicks ?? 0);
+		const ourPurchases = Number(r.our_purch ?? 0);
+		const marketPurchases = Number(r.market_purch ?? 0);
 		return {
 			country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
 			marketplaceId,
-			period: String(r["period"]),
+			period: String(r.period),
 			ourImpr,
 			marketImpr,
 			ourClicks,
@@ -142,52 +162,35 @@ export async function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Promise
 		};
 	});
 
-	const keywordRows = await sql<Array<Record<string, string | null>>>`
-		WITH per_query AS (
-			SELECT
-				"searchQuery",
-				"marketplaceId",
-				"dateFirst",
-				SUM(("impressionData"->>'asinImpressionCount')::int) AS our_impr,
-				SUM(("clickData"->>'asinClickCount')::int) AS our_clicks,
-				SUM(("purchaseData"->>'asinPurchaseCount')::int) AS our_purch,
-				-- MAX, not SUM, for the same reason as the periods query above: one
-				-- market figure per (searchQuery, marketplaceId, dateFirst), repeated
-				-- on every ASIN row of the group.
-				MAX(("impressionData"->>'totalQueryImpressionCount')::int) AS mkt_impr,
-				MAX(("clickData"->>'totalClickCount')::int) AS mkt_clicks,
-				MAX(("purchaseData"->>'totalPurchaseCount')::int) AS mkt_purch
-			FROM "amzreport_SEARCH_QUERY_PERFORMANCE"
-			WHERE "timeUnit" = ${timeUnit}
-				AND "marketplaceId" IN ${sql(marketplaceIds)}
-				${asinFilter}
-				AND "dateFirst"::date >= ${range.dateFirst}::date
-				AND "dateFirst"::date <= ${range.dateLast}::date
-			GROUP BY "searchQuery", "marketplaceId", "dateFirst"
-		)
-		SELECT
-			"searchQuery" AS q,
-			SUM(mkt_impr) AS mkt_impr,
-			SUM(our_impr) AS our_impr,
-			SUM(our_clicks) AS our_clicks,
-			SUM(mkt_clicks) AS mkt_clicks,
-			SUM(our_purch) AS our_purch,
-			SUM(mkt_purch) AS mkt_purch
-		FROM per_query
-		GROUP BY "searchQuery"
-		ORDER BY mkt_impr DESC NULLS LAST
-		LIMIT ${keywordLimit}
-	`;
+	const keywordRows = await runCompiled(
+		sql,
+		db
+			.with("per_query", () => perQuery)
+			.selectFrom("per_query")
+			.select((eb) => [
+				eb.ref("searchQuery").as("q"),
+				eb.fn.sum<string | null>("market_impr").as("mkt_impr"),
+				eb.fn.sum<string | null>("our_impr").as("our_impr"),
+				eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
+				eb.fn.sum<string | null>("market_clicks").as("mkt_clicks"),
+				eb.fn.sum<string | null>("our_purch").as("our_purch"),
+				eb.fn.sum<string | null>("market_purch").as("mkt_purch"),
+			])
+			.groupBy("searchQuery")
+			.orderBy("mkt_impr", (ob) => ob.desc().nullsLast())
+			.limit(keywordLimit)
+			.compile(),
+	);
 
 	const keywords: SqpKeywordRow[] = keywordRows.map((r) => {
-		const mktImpr = Number(r["mkt_impr"] ?? 0);
-		const ourImpr = Number(r["our_impr"] ?? 0);
-		const mktClicks = Number(r["mkt_clicks"] ?? 0);
-		const ourClicks = Number(r["our_clicks"] ?? 0);
-		const mktPurch = Number(r["mkt_purch"] ?? 0);
-		const ourPurch = Number(r["our_purch"] ?? 0);
+		const mktImpr = Number(r.mkt_impr ?? 0);
+		const ourImpr = Number(r.our_impr ?? 0);
+		const mktClicks = Number(r.mkt_clicks ?? 0);
+		const ourClicks = Number(r.our_clicks ?? 0);
+		const mktPurch = Number(r.mkt_purch ?? 0);
+		const ourPurch = Number(r.our_purch ?? 0);
 		return {
-			q: String(r["q"] ?? ""),
+			q: String(r.q ?? ""),
 			mktImpr,
 			ourImpr,
 			imprShare: share(ourImpr, mktImpr),

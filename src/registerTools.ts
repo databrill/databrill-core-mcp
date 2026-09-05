@@ -2,14 +2,14 @@
  * Mount every tool from the contract onto an MCP `Server`. This is the library
  * entry point: the stdio frontend (bin/stdio.ts) and the hosted frontend both
  * call this — they differ only in how `getSql` resolves the connection
- * (POSTGRES_URL vs OAuth→wsid→pooled target DB).
+ * (registry-selected local credential vs OAuth→wsid→pooled target DB).
  *
- * When a multi-workspace `WorkspaceDirectory` is passed, each tool gains an optional `wsid`
+ * When a `WorkspaceDirectory` is passed, each data tool gains a required `wsid`
  * argument (enum of the configured workspaces) and a `listWorkspaces` discovery
  * tool is exposed. `getSql` receives the call's arguments so it can route to the
  * right workspace connection, PLUS the calling tool's declared `access` kind so it
  * can route a write tool to a different connection than a read tool. Arguments alone
- * cannot express that, and deciding it by tool NAME outside this seam is exactly what
+ * cannot express that, and deciding it by tool NAME outside `registerTools` is exactly what
  * the declared access kind exists to prevent. Frontends with one connection ignore the
  * parameter. The directory carries no `database` field, so its keys and
  * `wsids`/`multiWorkspace` are recomputed on every `tools/list` call rather than
@@ -44,7 +44,7 @@ const LIST_WORKSPACES = "listWorkspaces";
 /** What a binding frontend needs to know about a tool BEFORE it dispatches the call. */
 export interface McpToolInfo {
 	readonly access: McpToolAccess;
-	/** True for the general SQL surface — the tools gated by `sql` or `sqlWrite`. */
+	/** True for the general SQL surface — the tools behind the `sql` or `sqlWrite` feature flag. */
 	readonly isSql: boolean;
 }
 
@@ -77,52 +77,32 @@ function isSqlTool(tool: McpTool): boolean {
 }
 
 export interface RegisterToolsOptions {
-	/** Feature flags for a fixed single-workspace frontend with no directory. */
+	/** Feature flags for a workspace-scoped frontend with no directory. */
 	readonly fixedFeatures?: WorkspaceFeatures;
 	/**
 	 * Per-call hooks, resolved from the same inputs as `getSql`. Frontends with a
-	 * single connection omit it and every hook is a no-op.
+	 * workspace-scoped connection omit it and every hook is a no-op.
 	 */
 	readonly getHooks?: (args: Record<string, unknown>, access: McpToolAccess) => McpToolHooks;
 }
 
-/** Add an optional `wsid` enum property to a tool's input schema (non-destructively). */
+/** Add a required `wsid` enum property to a tool's input schema (non-destructively). */
 function withWsid(
 	inputSchema: Record<string, unknown>,
 	wsids: string[],
-	alwaysRequired: boolean,
 ): Record<string, unknown> {
 	const properties = { ...(inputSchema["properties"] as Record<string, unknown> | undefined) };
 	properties["wsid"] = {
 		type: "string",
 		enum: wsids,
-		description: alwaysRequired
-			? "Workspace id (wsid). Required on every call to this tool. Call listWorkspaces to see the options."
-			: "Workspace id (wsid). Required only when the requested store(s) exist in more than one workspace; " +
-				"otherwise the workspace is inferred. Call listWorkspaces to see the options.",
+		description:
+			"Workspace id (wsid). Required on every call to this tool. Call listWorkspaces to see the options.",
 	};
 	const schema: Record<string, unknown> = { ...inputSchema, properties };
-	if (alwaysRequired) {
-		const raw = inputSchema["required"];
-		const required: unknown[] = Array.isArray(raw) ? [...raw] : [];
-		schema["required"] = required.includes("wsid") ? required : [...required, "wsid"];
-	}
+	const raw = inputSchema["required"];
+	const required: unknown[] = Array.isArray(raw) ? [...raw] : [];
+	schema["required"] = required.includes("wsid") ? required : [...required, "wsid"];
 	return schema;
-}
-
-/**
- * Whether a tool must advertise `wsid` even in a single-workspace directory.
- *
- * The general SQL tools do. A binding frontend may refuse a SQL call that names no
- * workspace — rather than inferring one — so that no caller-authored SQL is ever
- * routed implicitly and every such call names its workspace in the audit trail.
- * Advertising the property only when several workspaces exist would leave a
- * schema-following agent unable to satisfy that rule on a one-workspace session: the
- * tools declare `additionalProperties: false`, so `wsid` would not appear anywhere in
- * the contract it can see, while the call is refused for omitting it.
- */
-function requiresExplicitWsid(tool: McpTool): boolean {
-	return isSqlTool(tool);
 }
 
 function eligibleWsids(tool: McpTool, config: WorkspaceDirectory): string[] {
@@ -163,7 +143,7 @@ function isAllowedForCall(
 	try {
 		return workspaceHasFeature(resolveWorkspace(config, args), tool.feature);
 	} catch {
-		// Let the connection resolver produce its existing actionable ambiguity
+		// Let the connection resolver produce its actionable explicit-selection
 		// error. The tool is visible because at least one workspace supports it.
 		return true;
 	}
@@ -171,27 +151,22 @@ function isAllowedForCall(
 
 export function registerTools(
 	server: Server,
-	getSql: (args: Record<string, unknown>, access: McpToolAccess) => Sql,
+	getSql: (args: Record<string, unknown>, access: McpToolAccess) => Sql | Promise<Sql>,
 	config?: WorkspaceDirectory | null,
 	options: RegisterToolsOptions = {},
 ): void {
 	server.setRequestHandler(ListToolsRequestSchema, () => {
-		const wsids = config ? Object.keys(config.workspaces) : [];
-		const multiWorkspace = wsids.length > 1;
-
 		const listed = tools.filter((tool) => isVisible(tool, config, options)).map((tool) => ({
 			name: tool.name,
 			description: tool.description,
-			inputSchema: config && (multiWorkspace || requiresExplicitWsid(tool))
-				? withWsid(tool.inputSchema, eligibleWsids(tool, config), requiresExplicitWsid(tool))
-				: tool.inputSchema,
+			inputSchema: config ? withWsid(tool.inputSchema, eligibleWsids(tool, config)) : tool.inputSchema,
 		}));
 		if (config) {
 			listed.unshift({
 				name: LIST_WORKSPACES,
 				description:
 					"List the configured client workspaces (wsid, label, merchants and the countries each sells in). " +
-					"Use it to pick a `wsid` when a country is served by more than one workspace.",
+					"Use it to pick the explicit `wsid` required by every data tool.",
 				inputSchema: { type: "object", properties: {}, additionalProperties: false },
 			});
 		}
@@ -211,7 +186,7 @@ export function registerTools(
 		}
 		try {
 			const access = tool.access ?? "read";
-			const result = await tool.run(args, getSql(args, access), options.getHooks?.(args, access));
+			const result = await tool.run(args, await getSql(args, access), options.getHooks?.(args, access));
 			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
