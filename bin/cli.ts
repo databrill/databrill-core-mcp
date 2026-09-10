@@ -1,7 +1,7 @@
 /**
  * CLI frontend (dev / agency / parity). Runs under bun and deno:
- *   bun run bin/cli.ts salesDropDiagnosis --all-stores --format json
- *   deno run -A bin/cli.ts salesDropDiagnosis --stores DE,US
+ *   bun run bin/cli.ts salesDropDiagnosis --wsid 100000001 --all-stores --format json
+ *   deno run -A bin/cli.ts salesDropDiagnosis --wsid 100000001 --stores DE,US
  *
  * Same `(config, sql)` core as the MCP tool. `DATABRILL_CONFIG` maps the
  * required `--wsid` to that workspace's own credential.
@@ -449,7 +449,7 @@ const root = Command.make("core-mcp").pipe(
 	]),
 );
 
-const cli = Command.run(root, { name: "core-mcp", version: "0.2.3" });
+const cli = Command.run(root, { name: "core-mcp", version: "0.2.4" });
 
 cli(process.argv).pipe(
 	Effect.provide(NodeContext.layer),

@@ -14,6 +14,8 @@
  * parameter. The directory carries no `database` field, so its keys and
  * `wsids`/`multiWorkspace` are recomputed on every `tools/list` call rather than
  * cached at registration time — a hosted session's workspace set can change mid-session.
+ * A workspace-scoped frontend can instead pass `options.discoveryDirectory` with
+ * no routing directory to expose `listWorkspaces` without a `wsid` tool argument.
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -34,6 +36,7 @@ import {
 } from "./config.ts";
 import { tools } from "./contract.ts";
 import type { McpTool, McpToolAccess } from "./contract.ts";
+import { encodeToolResult } from "./sqlGuardrails.ts";
 import type { McpToolHooks } from "./toolHooks.ts";
 
 export type { McpToolAccess } from "./contract.ts";
@@ -77,6 +80,8 @@ function isSqlTool(tool: McpTool): boolean {
 }
 
 export interface RegisterToolsOptions {
+	/** Directory exposed by `listWorkspaces` without adding workspace selection to data tools. */
+	readonly discoveryDirectory?: WorkspaceDirectory;
 	/** Feature flags for a workspace-scoped frontend with no directory. */
 	readonly fixedFeatures?: WorkspaceFeatures;
 	/**
@@ -155,18 +160,21 @@ export function registerTools(
 	config?: WorkspaceDirectory | null,
 	options: RegisterToolsOptions = {},
 ): void {
+	const discoveryDirectory = config ?? options.discoveryDirectory;
 	server.setRequestHandler(ListToolsRequestSchema, () => {
 		const listed = tools.filter((tool) => isVisible(tool, config, options)).map((tool) => ({
 			name: tool.name,
 			description: tool.description,
 			inputSchema: config ? withWsid(tool.inputSchema, eligibleWsids(tool, config)) : tool.inputSchema,
 		}));
-		if (config) {
+		if (discoveryDirectory) {
 			listed.unshift({
 				name: LIST_WORKSPACES,
 				description:
 					"List the configured client workspaces (wsid, label, merchants and the countries each sells in). " +
-					"Use it to pick the explicit `wsid` required by every data tool.",
+					(config
+						? "Use it to pick the explicit `wsid` required by every data tool."
+						: "The connector URL fixes the active workspace; data tools need no `wsid` argument."),
 				inputSchema: { type: "object", properties: {}, additionalProperties: false },
 			});
 		}
@@ -176,8 +184,8 @@ export function registerTools(
 	server.setRequestHandler(CallToolRequestSchema, async (req: CallToolRequest) => {
 		const args = (req.params.arguments ?? {}) as Record<string, unknown>;
 
-		if (config && req.params.name === LIST_WORKSPACES) {
-			return { content: [{ type: "text", text: JSON.stringify(summarizeConfig(config), null, 2) }] };
+		if (discoveryDirectory && req.params.name === LIST_WORKSPACES) {
+			return { content: [{ type: "text", text: encodeToolResult(summarizeConfig(discoveryDirectory)) }] };
 		}
 
 		const tool = tools.find((t) => t.name === req.params.name);
@@ -187,7 +195,7 @@ export function registerTools(
 		try {
 			const access = tool.access ?? "read";
 			const result = await tool.run(args, await getSql(args, access), options.getHooks?.(args, access));
-			return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+			return { content: [{ type: "text", text: encodeToolResult(result) }] };
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };

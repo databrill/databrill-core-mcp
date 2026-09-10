@@ -21,15 +21,57 @@
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import {
+	COMMAND_TAG_RESERVE,
+	envelopeByteLength,
 	MAX_RESULT_BYTES,
 	parseRowLimit,
 	parseStatement,
 	type RowBudget,
 	runReadStatement,
 	STATEMENT_TIMEOUT_MS,
+	type TruncationCap,
 	truncationNotice,
 } from "../../sqlGuardrails.ts";
 import type { ExecuteSqlParams, ExecuteSqlResult } from "./types.ts";
+
+/**
+ * How much of the cap is NOT available to row text, for a call with this row cap.
+ *
+ * DERIVED, not guessed: it encodes an empty result for every `meta` this call can
+ * end up producing — each truncation state, each notice wording, the row count at
+ * its widest — and takes the largest. The only field whose length is not known
+ * up front is `command`, which `COMMAND_TAG_RESERVE` bounds. Reserving the worst
+ * case costs at most a few hundred bytes of 2 MiB, and buys the guarantee that the
+ * notice explaining a truncation always fits inside the cap that caused it.
+ *
+ * Exported for `tests/unit/sqlGuardrails.test.ts`, which checks the reserve against
+ * the envelope this tool really produces. Nothing else calls it.
+ */
+export function envelopeReserveBytes(rowLimit: number): number {
+	const shape: RowBudget = { rowLimit, byteLimit: MAX_RESULT_BYTES, envelopeReserveBytes: 0 };
+	const states: readonly (TruncationCap | null)[] = [null, "rows", "bytes"];
+	let reserve = 0;
+	for (const truncatedBy of states) {
+		// 0 and `rowLimit` are the two row counts whose notices differ, and
+		// `rowLimit` is also the widest `rowCount` the result can report.
+		for (const rowCount of [0, rowLimit]) {
+			reserve = Math.max(
+				reserve,
+				envelopeByteLength({
+					command: COMMAND_TAG_RESERVE,
+					rowCount,
+					limit: rowLimit,
+					byteLimit: MAX_RESULT_BYTES,
+					statementTimeoutMs: STATEMENT_TIMEOUT_MS,
+					isTruncated: truncatedBy !== null,
+					truncatedBy,
+					notice: truncationNotice(truncatedBy, shape, rowCount),
+				}),
+			);
+		}
+	}
+	return reserve;
+}
 
 export async function executeSql(
 	params: ExecuteSqlParams,
@@ -37,7 +79,12 @@ export async function executeSql(
 	hooks?: McpToolHooks,
 ): Promise<ExecuteSqlResult> {
 	const statement = parseStatement(params.sql);
-	const budget: RowBudget = { rowLimit: parseRowLimit(params.limit), byteLimit: MAX_RESULT_BYTES };
+	const rowLimit = parseRowLimit(params.limit);
+	const budget: RowBudget = {
+		rowLimit,
+		byteLimit: MAX_RESULT_BYTES,
+		envelopeReserveBytes: envelopeReserveBytes(rowLimit),
+	};
 
 	const execution = await runReadStatement(sql, statement, budget, hooks);
 	return {

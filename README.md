@@ -76,6 +76,9 @@ own provisioned role and its own environment variable.
 }
 ```
 
+`database.schema` may be omitted: the parser then uses `w<wsid>`, which is the
+value the example above states explicitly.
+
 With a config the server:
 
 - pools one connection per workspace, taking each registry entry's connection
@@ -149,9 +152,18 @@ What bounds these tools, in order of importance:
    executes stacked statements — every statement here goes through `.cursor()`
    instead, and there is no fetch-all path); a `READ ONLY` transaction for reads;
    `SET LOCAL statement_timeout` from a constant that no caller can influence; a
-   row cap (500 default, 1000 maximum, a larger request rejected rather than
-   clamped) and a 2 MiB serialized-JSON cap, with the result naming which cap
-   truncated it.
+   row cap and a 2 MiB cap on the compact JSON text of the whole result —
+   `meta` and the `data` array together, as the MCP response encodes them — with
+   the result naming which cap truncated it.
+
+   Both caps apply to `writeSql` as well as to the read tools. The row cap is 500
+   by default for `executeSql`, which accepts a `limit` up to 1000 and rejects a
+   larger request rather than clamping it; for `writeSql` it is always 1000, since
+   that tool takes no `limit` and a caller cannot run the statement again to ask
+   for more. The caps bound what a statement RETURNS and never what it does: a
+   truncated write has still run and committed in full, `meta.rowsAffected` is its
+   true total, and the notice says to read the rest with `executeSql` rather than
+   to re-run anything.
 
 No guard decides whether a statement may run by inspecting its SQL text. SQL
 parsing is defeated by functions and `DO` blocks and is never a security boundary

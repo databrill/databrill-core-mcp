@@ -4,7 +4,7 @@
     "npm:@effect/cli@0.75": "0.75.2_@effect+platform@0.96.1_effect@3.21.4",
     "npm:@effect/platform-node@0.106": "0.106.0_@effect+platform@0.96.1_effect@3.21.4",
     "npm:@effect/platform@0.96": "0.96.1_effect@3.21.4",
-    "npm:@jsr/databrill__core-pg-kysely@~0.1.9": "0.1.9",
+    "npm:@jsr/databrill__core-pg-kysely@~0.1.10": "0.1.10",
     "npm:@modelcontextprotocol/sdk@1": "1.29.0_zod@4.4.3",
     "npm:@types/luxon@^3.4.2": "3.7.1",
     "npm:dotenv@^16.4.5": "16.6.1",
@@ -136,13 +136,13 @@
         "hono"
       ]
     },
-    "@jsr/databrill__core-pg-kysely@0.1.9": {
-      "integrity": "sha512-9IwXCdPtq5YMcM0OJEvxAjAfsEoIAYsa3Z810zpBpOFv4nIKLDGP6le8b9NyMGHNouSOc93vVBzERbhjWrmeaA==",
+    "@jsr/databrill__core-pg-kysely@0.1.10": {
+      "integrity": "sha512-AQghUUdmaNMP4tYuQ8+3iX6ZtT9p4j0pId0dl5h2Zyqlz/sOETK3vQkZlIwcCU0/ZQ+n0w/+YnisQ7Mzeux44w==",
       "dependencies": [
         "kysely",
         "pg"
       ],
-      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.9.tgz"
+      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.10.tgz"
     },
     "@modelcontextprotocol/sdk@1.29.0_zod@4.4.3": {
       "integrity": "sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==",
@@ -977,7 +977,7 @@
         "npm:@effect/cli@0.75",
         "npm:@effect/platform-node@0.106",
         "npm:@effect/platform@0.96",
-        "npm:@jsr/databrill__core-pg-kysely@~0.1.9",
+        "npm:@jsr/databrill__core-pg-kysely@~0.1.10",
         "npm:@modelcontextprotocol/sdk@1",
         "npm:@types/luxon@^3.4.2",
         "npm:dotenv@^16.4.5",

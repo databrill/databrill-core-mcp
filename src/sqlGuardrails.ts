@@ -36,15 +36,40 @@ export type SqlRow = Record<string, unknown>;
  */
 export const STATEMENT_TIMEOUT_MS = 15_000;
 
-/** Default and maximum row caps, mirroring the `loadTflInventory` precedent. */
+/**
+ * Default and maximum row caps, mirroring the `loadTflInventory` precedent.
+ *
+ * `executeSql` starts at the default and lets a caller ask for up to the maximum.
+ * `writeSql` has no `limit` input and always uses the MAXIMUM, because a write
+ * caller cannot ask again — see `src/tools/writeSql/write.ts`.
+ */
 export const DEFAULT_ROW_LIMIT = 500;
 export const MAX_ROW_LIMIT = 1000;
 
-/** Serialized-JSON byte cap: 2 MiB. */
+/**
+ * The result byte cap: 2 MiB, measured over the COMPACT JSON text of the whole
+ * tool result — the `meta` object, the `data` array and its punctuation — as
+ * `encodeToolResult` produces it. Not over `data` alone, and not over the JSON-RPC
+ * frame that carries the text, whose escaping is the transport's business.
+ */
 export const MAX_RESULT_BYTES = 2 * 1024 * 1024;
 
 /** Rows fetched per cursor round trip. Bounds memory without a round trip per row. */
 const CURSOR_CHUNK_ROWS = 100;
+
+/**
+ * A stand-in for `meta.command` while a byte reserve is computed, which happens
+ * BEFORE the statement runs and its tag is known. postgres.js takes the tag from
+ * Postgres's `CommandComplete` with the trailing counts stripped
+ * (`node_modules/postgres/src/connection.js:590-600`), so it is one of Postgres's
+ * own command tags; the longest of those is `CREATE MATERIALIZED VIEW`, at 24
+ * characters. 64 covers every tag with room to spare, and costs 64 bytes of a
+ * 2 MiB cap.
+ *
+ * Shared by `executeSql` and `writeSql`, which derive their own reserves over
+ * their own `meta` shapes but bound this one field with the same Postgres fact.
+ */
+export const COMMAND_TAG_RESERVE = "x".repeat(64);
 
 /**
  * What an unrecoverable non-Postgres failure is reported as. Driver-level errors
@@ -55,7 +80,16 @@ const OPAQUE_FAILURE = "The database connection failed before the statement comp
 
 export interface RowBudget {
 	readonly rowLimit: number;
+	/** The cap on the WHOLE encoded result, envelope included. */
 	readonly byteLimit: number;
+	/**
+	 * How much of `byteLimit` is NOT available to row text: the `meta` object and
+	 * the truncation notice. Derived with `envelopeByteLength` from the worst-case
+	 * `meta` the call can produce — never guessed. Without it, a result that filled
+	 * the budget with rows would leave no room for the notice saying it was
+	 * truncated, and the encoded result would land above the cap it just reported.
+	 */
+	readonly envelopeReserveBytes: number;
 }
 
 interface SqlErrorInfo {
@@ -77,10 +111,16 @@ interface ReadExecution {
 interface WriteExecution {
 	/** The Postgres command tag (`INSERT`, `UPDATE`, `CREATE TABLE`, …). */
 	readonly command: string;
-	/** Rows affected as Postgres reported them, or `null` for commands with no count. */
+	/**
+	 * How many rows the statement AFFECTED, or `null` for a command whose tag
+	 * carries no count. Not the number returned: a truncated result still reports
+	 * the whole total here.
+	 */
 	readonly rowsAffected: number | null;
-	/** Rows produced by a `RETURNING` clause, if any. */
+	/** Rows produced by a `RETURNING` clause, bounded by the caller's budget. */
 	readonly rows: readonly SqlRow[];
+	/** Which cap bounded `rows`, or `null` when every returned row fit. */
+	readonly truncatedBy: TruncationCap | null;
 }
 
 interface RowAccumulator {
@@ -131,8 +171,58 @@ function fieldOf(value: unknown, key: string): unknown {
 
 const encoder = new TextEncoder();
 
-function serializedByteLength(row: SqlRow): number {
-	return encoder.encode(JSON.stringify(row)).length;
+/**
+ * Encode a tool result as the text the client receives: COMPACT JSON, no indent
+ * argument. This is the ONLY place an MCP tool result becomes text, and every
+ * byte number below is measured through it, so the number the cap is defined over
+ * and the number that is actually produced cannot be two different things.
+ *
+ * They were. Indentation costs two spaces per nesting level on every line, so it
+ * is unbounded in the DEPTH of a value rather than its size: a thousand rows each
+ * holding a depth-100 value summed to about 227 KB of row text and pretty-printed
+ * to over 21 MB, under a 2 MiB cap the per-row sum reported as met. Compact
+ * encoding removes that amplification outright and leaves the per-row sum exact
+ * to the envelope.
+ *
+ * The cost is that a raw response is harder for a person to read. It is paid on
+ * every response, whose reader is a language model; `bin/cli.ts` still prints
+ * tab-indented JSON for the human case.
+ */
+export function encodeToolResult(result: unknown): string {
+	return JSON.stringify(result);
+}
+
+/** UTF-8 byte length of the text `encodeToolResult` produces. */
+export function encodedByteLength(result: unknown): number {
+	return encoder.encode(encodeToolResult(result)).length;
+}
+
+/**
+ * What one row contributes to the encoded result, in the SAME encoding — this is
+ * the number `createRowAccumulator` sums, and it is `encodeToolResult` applied to
+ * the row rather than a second stringify that could drift from it.
+ */
+export function serializedByteLength(row: SqlRow): number {
+	return encodedByteLength(row);
+}
+
+/**
+ * What a result's wrapper costs: the encoded length of `{ meta, data: [] }`.
+ *
+ * With compact encoding the total is exact and has three terms —
+ *
+ *     total(n) = envelopeByteLength(meta) + SUM_i serializedByteLength(row_i) + max(0, n - 1)
+ *
+ * — the last term being the commas between the array's elements. Verified with
+ * delta 0 at n = 0, 1, 2, 10, 137 and 1000 over rows containing quotes, tabs,
+ * newlines and multibyte text.
+ *
+ * Generic over the `meta` shape on purpose: `writeSql`'s meta carries
+ * `rowsAffected` and `returnedRowCount` rather than `executeSql`'s fields, and it
+ * has to compute its own reserve from this function rather than a second rule.
+ */
+export function envelopeByteLength(meta: object): number {
+	return encodedByteLength({ meta, data: [] });
 }
 
 /**
@@ -166,10 +256,16 @@ export function parseStatement(value: string | undefined): string {
  * Accumulate rows until a cap trips. Both caps are checked BEFORE a row is kept,
  * and the row cap only trips on a row BEYOND the limit — so a query returning
  * exactly `rowLimit` rows reports itself complete rather than falsely truncated.
+ *
+ * `bytes` starts at the envelope reserve and adds the comma that precedes every
+ * row after the first, so it is not a proxy for the payload — it IS the encoded
+ * length of the result so far, the closed form in `envelopeByteLength` evaluated
+ * one row at a time. That costs one encode per row, the same order as before, and
+ * never re-encodes the growing result.
  */
 export function createRowAccumulator(budget: RowBudget): RowAccumulator {
 	const rows: SqlRow[] = [];
-	let bytes = 0;
+	let bytes = budget.envelopeReserveBytes;
 	let truncatedBy: TruncationCap | null = null;
 
 	return {
@@ -179,7 +275,7 @@ export function createRowAccumulator(budget: RowBudget): RowAccumulator {
 					truncatedBy = "rows";
 					return false;
 				}
-				const rowBytes = serializedByteLength(row);
+				const rowBytes = serializedByteLength(row) + (rows.length === 0 ? 0 : 1);
 				if (bytes + rowBytes > budget.byteLimit) {
 					truncatedBy = "bytes";
 					return false;
@@ -216,14 +312,55 @@ export function truncationNotice(
 			// instance is `EXPLAIN (FORMAT JSON)`, whose entire plan is one row —
 			// for which the generic "select fewer or narrower columns" advice below
 			// names nothing the caller can actually do.
-			return `The first row alone exceeded the ${budget.byteLimit}-byte serialized-JSON cap, ` +
-				"so no rows are returned. Project fewer or narrower columns from that one row, or — " +
-				"for a query plan — use EXPLAIN without FORMAT JSON, which returns one row per plan line.";
+			return `The first row alone exceeded the ${budget.byteLimit}-byte cap on the compact JSON ` +
+				"result (metadata included), so no rows are returned. Project fewer or narrower " +
+				"columns from that one row, or — for a query plan — use EXPLAIN without FORMAT JSON, " +
+				"which returns one row per plan line.";
 		}
-		return `Truncated at the ${budget.byteLimit}-byte serialized-JSON cap before the ` +
-			`${budget.rowLimit}-row cap: more rows match. Select fewer or narrower columns.`;
+		return `Truncated at the ${budget.byteLimit}-byte cap on the compact JSON result (metadata ` +
+			`included) before the ${budget.rowLimit}-row cap: more rows match. ` +
+			"Select fewer or narrower columns.";
 	}
 	return null;
+}
+
+/**
+ * The write path's own truncation notice, and the reason it is not
+ * `truncationNotice` above.
+ *
+ * All three read wordings end by telling the caller to narrow, aggregate or raise
+ * `limit` and ask again. Asking again repeats a write. So every wording here says
+ * three things the read wordings must not: the statement already ran and committed
+ * in full, a cap bounded only what came back, and the way to obtain the rest is
+ * `executeSql` rather than a second run of the same statement.
+ *
+ * `keptRowCount` only changes the byte-cap wording, and only in the zero-rows case,
+ * for the same reason it does there: "select fewer columns and read the rest" names
+ * nothing the caller can act on when not even the FIRST row fit.
+ */
+export function writeTruncationNotice(
+	truncatedBy: TruncationCap | null,
+	budget: RowBudget,
+	keptRowCount: number,
+): string | null {
+	if (truncatedBy === null) {
+		return null;
+	}
+	const ran = "The statement ran and committed in full; the cap bounds only what was returned. " +
+		"Do NOT re-run it, which would repeat the write. ";
+	if (truncatedBy === "rows") {
+		return `Truncated at the ${budget.rowLimit}-row cap: the statement returned more rows than are ` +
+			`shown, and meta.rowsAffected is how many. ` + ran + "Read the rest with executeSql.";
+	}
+	if (keptRowCount === 0) {
+		return `The first row alone exceeded the ${budget.byteLimit}-byte cap on the compact JSON result ` +
+			"(metadata included), so no rows are returned. " + ran +
+			"Read that row with executeSql, projecting fewer or narrower columns.";
+	}
+	return `Truncated at the ${budget.byteLimit}-byte cap on the compact JSON result (metadata included) ` +
+		`before the ${budget.rowLimit}-row cap: the statement returned more rows than are shown, and ` +
+		"meta.rowsAffected is how many. " + ran +
+		"Read the rest with executeSql, selecting fewer or narrower columns.";
 }
 
 /**
@@ -445,8 +582,40 @@ export function runReadStatement(
 }
 
 /**
+ * How many rows the statement really affected, from the command tag and from what
+ * the cursor delivered.
+ *
+ * The tag ALONE is last-chunk-only whenever the statement returned rows: when a
+ * portal is resumed, Postgres's `CommandComplete` counts only the rows the LAST
+ * `Execute` retrieved, and postgres.js discards each earlier `Result`
+ * (`node_modules/postgres/src/connection.js:845`, `result = new Result()` after
+ * every `PortalSuspended`), so `result.count` is the size of the final partial
+ * chunk rather than the statement's total.
+ *
+ * `rowsSeen` is every row the cursor callback was handed, INCLUDING the ones a
+ * tripped cap declined to keep — which is why bounding the result and repairing
+ * this receipt are one change rather than two. Both branches were measured against
+ * postgres:17 rather than reasoned about:
+ *
+ *   - the tag carries no count (`EXPLAIN`, `SHOW`, `CREATE TABLE`) — the answer is
+ *     `null` however many rows came back, so a 231-line query plan is never
+ *     reported as 231 affected rows;
+ *   - the statement returned NO rows (`UPDATE … WHERE` with no `RETURNING`) — the
+ *     portal never suspended, so the single `CommandComplete` carries the whole
+ *     count and the tag is right. Measured: 250, 5 and 0 each reported exactly.
+ *     A 250-row `UPDATE … RETURNING` reported 50, and `rowsSeen` is what corrects it.
+ */
+function rowsAffected(tagCount: number, rowsSeen: number): number | null {
+	if (!Number.isInteger(tagCount)) {
+		return null;
+	}
+	return rowsSeen > 0 ? rowsSeen : tagCount;
+}
+
+/**
  * Execute ONE caller statement in a transaction promoted to READ WRITE, with the
- * same single-statement enforcement and the same timeout, and NO row cap.
+ * same single-statement enforcement, the same timeout and the same result caps as
+ * a read — but stopping the statement is never how a cap is applied here.
  *
  * The promotion is needed because the role's `default_transaction_read_only` is
  * a DEFAULT, not a lock. It is not what makes the write safe: the write is
@@ -455,6 +624,7 @@ export function runReadStatement(
 export async function runWriteStatement(
 	sql: Sql,
 	statement: string,
+	budget: RowBudget,
 	hooks?: McpToolHooks,
 ): Promise<WriteExecution> {
 	try {
@@ -464,35 +634,46 @@ export async function runWriteStatement(
 			await executeUnit(tx, "SET TRANSACTION READ WRITE");
 			await assertIdentity(tx, hooks);
 			await executeUnit(tx, statementTimeoutStatement());
-			const rows: SqlRow[] = [];
+			const accumulator = createRowAccumulator(budget);
 			let delivered: readonly SqlRow[] | null = null;
+			let rowsSeen = 0;
 			const result = await tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
 				delivered = chunk;
-				rows.push(...chunk);
+				rowsSeen += chunk.length;
+				// `undefined`, ALWAYS — never `sql.CLOSE`, which is what the read path
+				// returns at its cap. The two paths stop differently on purpose. A read
+				// has nothing left to finish, so closing its portal costs nothing; closing
+				// the portal of an `INSERT … RETURNING` stops the statement MID-EXECUTION
+				// and the transaction then commits whatever ran. A caller who asked to
+				// insert 10000 rows would get some prefix of them written and a receipt
+				// calling the result merely truncated — the worst outcome this change can
+				// have, and it is one returned value away.
+				//
+				// So the callback keeps being called for every remaining chunk, the portal
+				// drains, the statement completes and commits exactly once, and the rows
+				// past the cap cost only the chunk they arrived in. `add`'s `false` is
+				// ignored deliberately: it says "stop KEEPING", not "stop reading".
+				accumulator.add(chunk);
+				return undefined;
 			});
 			// The identical lost-last-chunk defect and the identical double-count hazard
 			// as the read path: see `runReadStatement` for the mechanism, for why the
 			// discriminator is object identity rather than `count`, and for why
-			// `.forEach` is not the simpler fix. There is no cap on this path, so the
-			// callback never returns `sql.CLOSE` and no `stopped` guard is needed — but
-			// the residual still goes onto `rows` through the same push the chunks take,
-			// never by a second route.
-			rows.push(...residualRows(result, delivered));
+			// `.forEach` is not the simpler fix.
+			//
+			// The residual goes through `accumulator.add` like every other chunk and never
+			// straight onto a rows array. Pushing it unguarded past a tripped cap is the
+			// specific way a capped result would exceed the budget it just reported. No
+			// `stopped` guard is needed the way the read path needs one: nothing stops
+			// here, and the accumulator refuses rows past its cap by itself.
+			const residual = residualRows(result, delivered);
+			rowsSeen += residual.length;
+			accumulator.add(residual);
 			return {
 				command: result.command,
-				// LAST-CHUNK-ONLY, so an UNDERCOUNT for any statement whose rows spanned
-				// more than one cursor chunk: a 100-row `INSERT … RETURNING` reports 0 and
-				// a 101-row one reports 1 (measured, not theorised). When a portal is
-				// resumed, Postgres's `CommandComplete` tag counts only the rows the LAST
-				// `Execute` retrieved, and postgres.js discards each earlier `Result`
-				// (`connection.js:845`, `result = new Result()` after every
-				// `PortalSuspended`), so `result.count` is the size of the final partial
-				// chunk rather than the statement's total. Deliberately NOT repaired here:
-				// choosing between the tag's count and `rows.length` changes what the
-				// receipt MEANS for a `RETURNING` statement, and this change is only about
-				// not dropping rows. `meta.returnedRowCount` is trustworthy in the meantime.
-				rowsAffected: Number.isInteger(result.count) ? result.count : null,
-				rows,
+				rowsAffected: rowsAffected(result.count, rowsSeen),
+				rows: accumulator.rows(),
+				truncatedBy: accumulator.truncatedBy(),
 			};
 		});
 	} catch (err) {

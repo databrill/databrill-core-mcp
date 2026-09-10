@@ -2,7 +2,7 @@ import type { Sql } from "postgres";
 import { SQL_FEATURE } from "../../config.ts";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import { executeSql } from "./execute.ts";
-import { DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT, STATEMENT_TIMEOUT_MS } from "../../sqlGuardrails.ts";
+import { DEFAULT_ROW_LIMIT, MAX_RESULT_BYTES, MAX_ROW_LIMIT, STATEMENT_TIMEOUT_MS } from "../../sqlGuardrails.ts";
 import type { ExecuteSqlParams } from "./types.ts";
 
 // No `timeout` property, deliberately: the per-call statement timeout is a
@@ -44,8 +44,9 @@ export const executeSqlTool = {
 		"the plan as rows (one row per plan line, or a single parsed row with FORMAT JSON), as are SHOW " +
 		"and other statements that return rows without modifying data. Runs in a READ ONLY transaction " +
 		`with a ${STATEMENT_TIMEOUT_MS}ms statement timeout; results are capped by row count and by ` +
-		"serialized size, and the result says explicitly when and why it was truncated. meta.command " +
-		"reports the Postgres command tag of the statement that ran.",
+		`the ${MAX_RESULT_BYTES}-byte size of the compact JSON response (metadata included), and the ` +
+		"result says explicitly when and why it was truncated. meta.command reports the Postgres " +
+		"command tag of the statement that ran.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => executeSql(parseParams(args), sql, hooks),
 };

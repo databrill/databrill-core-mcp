@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import { SQL_WRITE_FEATURE } from "../../config.ts";
 import type { McpToolHooks } from "../../toolHooks.ts";
-import { STATEMENT_TIMEOUT_MS } from "../../sqlGuardrails.ts";
+import { MAX_RESULT_BYTES, MAX_ROW_LIMIT, STATEMENT_TIMEOUT_MS } from "../../sqlGuardrails.ts";
 import type { WriteSqlParams } from "./types.ts";
 import { writeSql } from "./write.ts";
 
@@ -31,7 +31,11 @@ export const writeSqlTool = {
 	description: "Run one write statement against this workspace's configuration tables. The statement commits " +
 		"only if the workspace's write role has been granted on the target table; pipeline data tables " +
 		`are refused by Postgres. Runs with a ${STATEMENT_TIMEOUT_MS}ms statement timeout and returns the ` +
-		"command tag, the affected row count, and any RETURNING rows.",
+		"command tag, how many rows the statement affected, and its RETURNING rows — capped at " +
+		`${MAX_ROW_LIMIT} rows and by the ${MAX_RESULT_BYTES}-byte size of the compact JSON response ` +
+		"(metadata included). A cap bounds only what comes back: the statement always runs and commits in " +
+		"full, meta.rowsAffected reports its true total, and meta.isTruncated says when a cap applied. Do " +
+		"not re-run a truncated statement, which would repeat the write; read the rest with executeSql.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => writeSql(parseParams(args), sql, hooks),
 };
