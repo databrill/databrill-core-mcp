@@ -5,6 +5,8 @@
  * core-agent-docs `src/amazonMetrics`; the loader (`loadAds.ts`) is unchanged.
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadAds, type LoadAdsParams, VALID_GROUP_BY, VALID_TIME_UNITS } from "./loadAds.ts";
 
@@ -52,18 +54,20 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadAdsParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		when: String(args["when"] ?? ""),
-		groupBy: String(args["groupBy"] ?? ""),
-		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
-		products: typeof args["products"] === "string" ? args["products"] : undefined,
-		filter: typeof args["filter"] === "string" ? args["filter"] : undefined,
-		derived: typeof args["derived"] === "boolean" ? args["derived"] : undefined,
-		nested: typeof args["nested"] === "boolean" ? args["nested"] : undefined,
-		format: "json",
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadAdsParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			when: yield* stringArgument(args["when"], "when"),
+			groupBy: yield* stringArgument(args["groupBy"], "groupBy"),
+			timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+			products: typeof args["products"] === "string" ? args["products"] : undefined,
+			filter: typeof args["filter"] === "string" ? args["filter"] : undefined,
+			derived: typeof args["derived"] === "boolean" ? args["derived"] : undefined,
+			nested: typeof args["nested"] === "boolean" ? args["nested"] : undefined,
+			format: "json",
+		};
+	});
 }
 
 export const loadAdsTool = {
@@ -74,5 +78,6 @@ export const loadAdsTool = {
 		"unit. Returns impressions, clicks, addToCart, purchases, units, spend, revenue, and halo (cross-product) metrics; " +
 		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; data lags 1-2 days.",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadAds(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadAds(params, sql)),
 };

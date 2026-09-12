@@ -5,6 +5,7 @@
  * identity (resolved stores) and the connection (injected) changed.
  */
 
+import { Effect } from "effect";
 import type postgres from "postgres";
 import type { AdMetrics } from "../../AdMetrics.ts";
 import { sinceDaysAgo } from "../../clientData.ts";
@@ -179,115 +180,117 @@ function resolveConfig(p: LoadInventoryPacingParams): PacingConfig {
 	};
 }
 
-export async function loadInventoryPacing(
+export function loadInventoryPacing(
 	params: LoadInventoryPacingParams,
 	sql: postgres.Sql,
-): Promise<LoadInventoryPacingResult> {
-	if (!params.stores) throw new Error("stores is required");
-	const config = resolveConfig(params);
+): Effect.Effect<LoadInventoryPacingResult, Error> {
+	return Effect.gen(function* () {
+		if (!params.stores) return yield* Effect.fail(new Error("stores is required"));
+		const config = resolveConfig(params);
 
-	const stores = await resolveStores(params.stores, sql);
-	const invRows = await loadLowInventory(sql, stores, config.velocityDays);
+		const stores = yield* resolveStores(params.stores, sql);
+		const invRows = yield* loadLowInventory(sql, stores, config.velocityDays);
 
-	// Fold ASIN rows into family-level inventory.
-	const fams = new Map<string, FamilyInv>();
-	for (const r of invRows) {
-		const site = r.country.toUpperCase();
-		const key = `${r.merchantId}|||${site}|||${r.family}`;
-		let f = fams.get(key);
-		if (!f) {
-			f = {
-				merchantId: r.merchantId,
-				site,
-				family: r.family,
-				available: 0,
-				inbound: 0,
-				units7d: 0,
-				worstAsin: null,
-				worstAsinLabel: null,
-				worstAsinRunway: null,
-			};
-			fams.set(key, f);
+		// Fold ASIN rows into family-level inventory.
+		const fams = new Map<string, FamilyInv>();
+		for (const r of invRows) {
+			const site = r.country.toUpperCase();
+			const key = `${r.merchantId}|||${site}|||${r.family}`;
+			let f = fams.get(key);
+			if (!f) {
+				f = {
+					merchantId: r.merchantId,
+					site,
+					family: r.family,
+					available: 0,
+					inbound: 0,
+					units7d: 0,
+					worstAsin: null,
+					worstAsinLabel: null,
+					worstAsinRunway: null,
+				};
+				fams.set(key, f);
+			}
+			f.available += r.inventoryFba + r.inventoryFbm;
+			f.inbound += r.inbound;
+			f.units7d += r.units7d;
+			if (r.runway != null && (f.worstAsinRunway == null || r.runway < f.worstAsinRunway)) {
+				f.worstAsinRunway = r.runway;
+				f.worstAsin = r.asin;
+				f.worstAsinLabel = r.label;
+			}
 		}
-		f.available += r.inventoryFba + r.inventoryFbm;
-		f.inbound += r.inbound;
-		f.units7d += r.units7d;
-		if (r.runway != null && (f.worstAsinRunway == null || r.runway < f.worstAsinRunway)) {
-			f.worstAsinRunway = r.runway;
-			f.worstAsin = r.asin;
-			f.worstAsinLabel = r.label;
-		}
-	}
 
-	const merchantIds = [...new Set(stores.map((s) => s.merchantId))];
-	const since = sinceDaysAgo(config.spendWindowDays);
-	const familyWindow = await loadFamilyWindow(sql, merchantIds, since);
-	const adByKey = groupByWith(
-		familyWindow,
-		(row): string => `${row.merchantId}|||${row.site.toUpperCase()}|||${row.family}`,
-		(rows): FamilyAdSummary => {
-			const adMetrics = summarizeAdMetrics(rows);
-			return {
-				...adMetrics,
-				totalSales: rows.reduce((sum, row) => sum + row.totalSales, 0),
-			};
-		},
-	);
+		const merchantIds = [...new Set(stores.map((s) => s.merchantId))];
+		const since = sinceDaysAgo(config.spendWindowDays);
+		const familyWindow = yield* loadFamilyWindow(sql, merchantIds, since);
+		const adByKey = groupByWith(
+			familyWindow,
+			(row): string => `${row.merchantId}|||${row.site.toUpperCase()}|||${row.family}`,
+			(rows): FamilyAdSummary => {
+				const adMetrics = summarizeAdMetrics(rows);
+				return {
+					...adMetrics,
+					totalSales: rows.reduce((sum, row) => sum + row.totalSales, 0),
+				};
+			},
+		);
 
-	const out: PacingRow[] = [];
-	for (const [key, f] of fams) {
-		const velocityPerDay = f.units7d / Math.max(1, config.velocityDays);
-		const runwayDays = velocityPerDay > 0 ? f.available / velocityPerDay : null;
-		const runwayWithInboundDays = velocityPerDay > 0 ? (f.available + f.inbound) / velocityPerDay : null;
+		const out: PacingRow[] = [];
+		for (const [key, f] of fams) {
+			const velocityPerDay = f.units7d / Math.max(1, config.velocityDays);
+			const runwayDays = velocityPerDay > 0 ? f.available / velocityPerDay : null;
+			const runwayWithInboundDays = velocityPerDay > 0 ? (f.available + f.inbound) / velocityPerDay : null;
 
-		const ad = adByKey[key];
-		const adSpendPerDay = (ad?.adSpend ?? 0) / Math.max(1, config.spendWindowDays);
-		const adSalesPerDay = (ad?.adSales ?? 0) / Math.max(1, config.spendWindowDays);
-		const tacos = ad && ad.totalSales > 0 ? ad.adSpend / ad.totalSales : null;
+			const ad = adByKey[key];
+			const adSpendPerDay = (ad?.adSpend ?? 0) / Math.max(1, config.spendWindowDays);
+			const adSalesPerDay = (ad?.adSales ?? 0) / Math.max(1, config.spendWindowDays);
+			const tacos = ad && ad.totalSales > 0 ? ad.adSpend / ad.totalSales : null;
 
-		const { action, severity, rationale } = decide(
-			{
+			const { action, severity, rationale } = decide(
+				{
+					runwayDays,
+					runwayWithInboundDays,
+					velocityPerDay,
+					adSpendPerDay,
+					inbound: f.inbound,
+					tacos,
+					worstAsin: f.worstAsin,
+					worstAsinLabel: f.worstAsinLabel,
+					worstAsinRunway: f.worstAsinRunway,
+				},
+				config,
+			);
+
+			out.push({
+				merchantId: f.merchantId,
+				site: f.site,
+				family: f.family,
+				available: f.available,
+				inbound: f.inbound,
+				velocityPerDay,
 				runwayDays,
 				runwayWithInboundDays,
-				velocityPerDay,
-				adSpendPerDay,
-				inbound: f.inbound,
-				tacos,
 				worstAsin: f.worstAsin,
 				worstAsinLabel: f.worstAsinLabel,
 				worstAsinRunway: f.worstAsinRunway,
-			},
-			config,
+				adSpendPerDay,
+				adSalesPerDay,
+				tacos,
+				action,
+				severity,
+				rationale,
+			});
+		}
+
+		out.sort((a, b) =>
+			actionRank[a.action] - actionRank[b.action] ||
+			(a.runwayDays ?? Infinity) - (b.runwayDays ?? Infinity)
 		);
 
-		out.push({
-			merchantId: f.merchantId,
-			site: f.site,
-			family: f.family,
-			available: f.available,
-			inbound: f.inbound,
-			velocityPerDay,
-			runwayDays,
-			runwayWithInboundDays,
-			worstAsin: f.worstAsin,
-			worstAsinLabel: f.worstAsinLabel,
-			worstAsinRunway: f.worstAsinRunway,
-			adSpendPerDay,
-			adSalesPerDay,
-			tacos,
-			action,
-			severity,
-			rationale,
-		});
-	}
-
-	out.sort((a, b) =>
-		actionRank[a.action] - actionRank[b.action] ||
-		(a.runwayDays ?? Infinity) - (b.runwayDays ?? Infinity)
-	);
-
-	return {
-		meta: { stores: [...new Set(stores.map((s) => s.countryCode))], familyCount: out.length, config },
-		data: out,
-	};
+		return {
+			meta: { stores: [...new Set(stores.map((s) => s.countryCode))], familyCount: out.length, config },
+			data: out,
+		};
+	});
 }

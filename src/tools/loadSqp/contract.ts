@@ -2,6 +2,8 @@
  * loadSqp — MCP tool contract (the dbl-metrics-sqp loader).
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadSqp } from "./load.ts";
 import { type LoadSqpParams, VALID_SQP_TIME_UNITS } from "./types.ts";
@@ -30,14 +32,16 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadSqpParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		when: String(args["when"] ?? ""),
-		products: typeof args["products"] === "string" ? args["products"] : undefined,
-		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
-		keywordLimit: typeof args["keywordLimit"] === "number" ? args["keywordLimit"] : undefined,
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadSqpParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			when: yield* stringArgument(args["when"], "when"),
+			products: typeof args["products"] === "string" ? args["products"] : undefined,
+			timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+			keywordLimit: typeof args["keywordLimit"] === "number" ? args["keywordLimit"] : undefined,
+		};
+	});
 }
 
 export const loadSqpTool = {
@@ -50,5 +54,6 @@ export const loadSqpTool = {
 		"per-search rather than per-impression. Bucketed by the report's WEEK or MONTH timeUnit, across the " +
 		"requested marketplaces. Reads the client DB (amzreport_SEARCH_QUERY_PERFORMANCE).",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadSqp(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadSqp(params, sql)),
 };

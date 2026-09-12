@@ -9,30 +9,57 @@
 
 import "temporal-polyfill/global";
 import "dotenv/config";
+import { Effect } from "effect";
+import { exitValue, tryOrOperationError, tryPromiseOrOperationError } from "../src/effectErrors.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "../src/config.ts";
-import { createSqlProvider } from "../src/db.ts";
+import { acquireSqlProvider } from "../src/db.ts";
 import { registerTools } from "../src/registerTools.ts";
 
-const config = loadConfig();
-if (config === null) {
-	throw new Error("DATABRILL_CONFIG is required; unscoped POSTGRES_URL mode is not supported");
-}
-const provider = createSqlProvider(config);
+const program = Effect.gen(function* () {
+	const config = yield* loadConfig();
+	if (config === null) {
+		return yield* Effect.fail(
+			new Error("DATABRILL_CONFIG is required; unscoped POSTGRES_URL mode is not supported"),
+		);
+	}
+	const provider = yield* acquireSqlProvider(config);
+	const server = yield* Effect.acquireRelease(
+		Effect.suspend(() =>
+			tryOrOperationError(() =>
+				new Server(
+					{ name: "databrill-core-mcp", version: "0.2.5" },
+					{ capabilities: { tools: {} } },
+				)
+			)
+		),
+		(server) => Effect.orDie(tryPromiseOrOperationError(() => server.close())),
+	);
 
-const server = new Server(
-	{ name: "databrill-core-mcp", version: "0.2.4" },
-	{ capabilities: { tools: {} } },
-);
-// One connection per workspace, so the tool's access kind changes nothing here.
-registerTools(server, (args, _access) => provider.getSqlForArgs(args), config);
+	// One connection per workspace, so the tool's access kind changes nothing here.
+	yield* registerTools(server, (args, _access) => provider.getSqlForArgs(args), config);
+	yield* tryPromiseOrOperationError(() => server.connect(new StdioServerTransport()));
+	// Input closure and process signals end the scope; remove listeners on every exit.
+	yield* Effect.async<void>((resume) => {
+		function shutdown() {
+			process.off("SIGINT", shutdown);
+			process.off("SIGTERM", shutdown);
+			process.stdin.off("end", shutdown);
+			resume(Effect.void);
+		}
+		process.on("SIGINT", shutdown);
+		process.on("SIGTERM", shutdown);
+		process.stdin.on("end", shutdown);
+		if (process.stdin.readableEnded) {
+			shutdown();
+		}
+		return Effect.sync(() => {
+			process.off("SIGINT", shutdown);
+			process.off("SIGTERM", shutdown);
+			process.stdin.off("end", shutdown);
+		});
+	});
+}).pipe(Effect.scoped);
 
-await server.connect(new StdioServerTransport());
-
-const shutdown = async () => {
-	await provider.endAll();
-	process.exit(0);
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+await Effect.runPromiseExit(program).then(exitValue);

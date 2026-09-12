@@ -4,7 +4,6 @@
  * the hosted frontend all consume this; the plugin's skill is generated from it.
  */
 
-import { Effect } from "effect";
 import type { Sql } from "postgres";
 import { load } from "./load.ts";
 import type { LoadConfig } from "./types.ts";
@@ -66,5 +65,5 @@ export const salesDropDiagnosisTool = {
 		"conversion (units/session) and price (average selling price), ranks the causes by their share of the change, " +
 		"and attaches ad-channel and ad-efficiency signals. Reads the client database. Returns one diagnosis object per in-scope store.",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => Effect.runPromise(load(parseConfig(args), sql)),
+	run: (args: Record<string, unknown>, sql: Sql) => load(parseConfig(args), sql),
 };

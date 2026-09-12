@@ -31,6 +31,7 @@
  * feature-origination rule does not apply to this tool family.
  */
 
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import {
@@ -38,10 +39,10 @@ import {
 	envelopeByteLength,
 	MAX_RESULT_BYTES,
 	MAX_ROW_LIMIT,
-	parseStatement,
 	type RowBudget,
 	runWriteStatement,
 	STATEMENT_TIMEOUT_MS,
+	trimStatement,
 	type TruncationCap,
 	writeTruncationNotice,
 } from "../../sqlGuardrails.ts";
@@ -76,50 +77,54 @@ const WRITE_ROW_LIMIT = MAX_ROW_LIMIT;
  * Exported for `tests/unit/sqlGuardrails.test.ts`, which checks the reserve against
  * the envelope this tool really produces. Nothing else calls it.
  */
-export function writeEnvelopeReserveBytes(): number {
-	const shape: RowBudget = { rowLimit: WRITE_ROW_LIMIT, byteLimit: MAX_RESULT_BYTES, envelopeReserveBytes: 0 };
-	const states: readonly (TruncationCap | null)[] = [null, "rows", "bytes"];
-	let reserve = 0;
-	for (const truncatedBy of states) {
-		// 0 and the cap are the two row counts whose notices differ, and the cap is
-		// also the widest `returnedRowCount` the result can report.
-		for (const returnedRowCount of [0, WRITE_ROW_LIMIT]) {
-			reserve = Math.max(
-				reserve,
-				envelopeByteLength({
-					command: COMMAND_TAG_RESERVE,
-					rowsAffected: Number.MAX_SAFE_INTEGER,
-					returnedRowCount,
-					statementTimeoutMs: STATEMENT_TIMEOUT_MS,
-					isTruncated: truncatedBy !== null,
-					truncatedBy,
-					notice: writeTruncationNotice(truncatedBy, shape, returnedRowCount),
-				}),
-			);
+export function writeEnvelopeReserveBytes(): Either.Either<number, Error> {
+	return Either.gen(function* () {
+		const shape: RowBudget = { rowLimit: WRITE_ROW_LIMIT, byteLimit: MAX_RESULT_BYTES, envelopeReserveBytes: 0 };
+		const states: readonly (TruncationCap | null)[] = [null, "rows", "bytes"];
+		let reserve = 0;
+		for (const truncatedBy of states) {
+			// 0 and the cap are the two row counts whose notices differ, and the cap is
+			// also the widest `returnedRowCount` the result can report.
+			for (const returnedRowCount of [0, WRITE_ROW_LIMIT]) {
+				reserve = Math.max(
+					reserve,
+					yield* envelopeByteLength({
+						command: COMMAND_TAG_RESERVE,
+						rowsAffected: Number.MAX_SAFE_INTEGER,
+						returnedRowCount,
+						statementTimeoutMs: STATEMENT_TIMEOUT_MS,
+						isTruncated: truncatedBy !== null,
+						truncatedBy,
+						notice: writeTruncationNotice(truncatedBy, shape, returnedRowCount),
+					}),
+				);
+			}
 		}
-	}
-	return reserve;
+		return reserve;
+	});
 }
 
-export async function writeSql(params: WriteSqlParams, sql: Sql, hooks?: McpToolHooks): Promise<WriteSqlResult> {
-	const statement = parseStatement(params.sql);
-	const budget: RowBudget = {
-		rowLimit: WRITE_ROW_LIMIT,
-		byteLimit: MAX_RESULT_BYTES,
-		envelopeReserveBytes: writeEnvelopeReserveBytes(),
-	};
+export function writeSql(params: WriteSqlParams, sql: Sql, hooks?: McpToolHooks): Effect.Effect<WriteSqlResult, Error> {
+	return Effect.gen(function* () {
+		const statement = yield* trimStatement(params.sql);
+		const budget: RowBudget = {
+			rowLimit: WRITE_ROW_LIMIT,
+			byteLimit: MAX_RESULT_BYTES,
+			envelopeReserveBytes: yield* writeEnvelopeReserveBytes(),
+		};
 
-	const execution = await runWriteStatement(sql, statement, budget, hooks);
-	return {
-		meta: {
-			command: execution.command,
-			rowsAffected: execution.rowsAffected,
-			returnedRowCount: execution.rows.length,
-			statementTimeoutMs: STATEMENT_TIMEOUT_MS,
-			isTruncated: execution.truncatedBy !== null,
-			truncatedBy: execution.truncatedBy,
-			notice: writeTruncationNotice(execution.truncatedBy, budget, execution.rows.length),
-		},
-		data: execution.rows,
-	};
+		const execution = yield* runWriteStatement(sql, statement, budget, hooks);
+		return {
+			meta: {
+				command: execution.command,
+				rowsAffected: execution.rowsAffected,
+				returnedRowCount: execution.rows.length,
+				statementTimeoutMs: STATEMENT_TIMEOUT_MS,
+				isTruncated: execution.truncatedBy !== null,
+				truncatedBy: execution.truncatedBy,
+				notice: writeTruncationNotice(execution.truncatedBy, budget, execution.rows.length),
+			},
+			data: execution.rows,
+		};
+	});
 }

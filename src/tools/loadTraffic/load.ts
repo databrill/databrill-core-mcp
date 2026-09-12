@@ -7,6 +7,7 @@
  * FAMILY levels do not merge marketplace rows that this public result retains.
  */
 
+import { Effect, Either } from "effect";
 import {
 	type AmazonReportSalesAndTrafficResult,
 	type AmazonReportSalesAndTrafficRow,
@@ -49,8 +50,8 @@ interface MarketplaceGroup {
 	readonly merchantIds: Set<string>;
 }
 
-function fail(msg: string): never {
-	throw new Error(msg);
+function fail(msg: string): Either.Either<never, Error> {
+	return Either.left(new Error(msg));
 }
 
 function round2(n: number): number {
@@ -65,18 +66,22 @@ function isTrafficTimeUnit(value: string): value is TrafficTimeUnit {
 	return VALID_TRAFFIC_TIME_UNITS.some((candidate) => candidate === value);
 }
 
-function parseTrafficGroupBy(value: string): TrafficGroupBy {
-	if (isTrafficGroupBy(value)) {
-		return value;
-	}
-	return fail(`Unknown groupBy '${value}'. Valid: ${VALID_TRAFFIC_GROUP_BY.join(", ")}`);
+function parseTrafficGroupBy(value: string): Either.Either<TrafficGroupBy, Error> {
+	return Either.gen(function* () {
+		if (isTrafficGroupBy(value)) {
+			return value;
+		}
+		return (yield* fail(`Unknown groupBy '${value}'. Valid: ${VALID_TRAFFIC_GROUP_BY.join(", ")}`));
+	});
 }
 
-function parseTrafficTimeUnit(value: string): TrafficTimeUnit {
-	if (isTrafficTimeUnit(value)) {
-		return value;
-	}
-	return fail(`Unknown timeUnit '${value}'. Valid: ${VALID_TRAFFIC_TIME_UNITS.join(", ")}`);
+function parseTrafficTimeUnit(value: string): Either.Either<TrafficTimeUnit, Error> {
+	return Either.gen(function* () {
+		if (isTrafficTimeUnit(value)) {
+			return value;
+		}
+		return (yield* fail(`Unknown timeUnit '${value}'. Valid: ${VALID_TRAFFIC_TIME_UNITS.join(", ")}`));
+	});
 }
 
 function groupStoresByMarketplace(stores: readonly ResolvedStore[]): MarketplaceGroup[] {
@@ -144,101 +149,105 @@ function compareTrafficRows(left: TrafficRow, right: TrafficRow, groupBy: Traffi
 	return grouped !== 0 ? grouped : left.marketplaceId.localeCompare(right.marketplaceId);
 }
 
-export async function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Promise<LoadTrafficResult> {
-	if (!params.stores) fail("stores is required");
-	if (!params.when) fail("when is required");
+export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effect.Effect<LoadTrafficResult, Error> {
+	return Effect.gen(function* () {
+		if (!params.stores) return yield* fail("stores is required");
+		if (!params.when) return yield* fail("when is required");
 
-	const groupBy = parseTrafficGroupBy(params.groupBy ?? "asin");
-	const timeUnit = parseTrafficTimeUnit(params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK");
+		const groupBy = yield* parseTrafficGroupBy(params.groupBy ?? "asin");
+		const timeUnit = yield* parseTrafficTimeUnit(params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK");
 
-	const stores = await resolveStores(params.stores, sql);
-	const marketplaceGroups = groupStoresByMarketplace(stores);
-	const when = parseWhenRange(params.when);
+		const stores = yield* resolveStores(params.stores, sql);
+		const marketplaceGroups = groupStoresByMarketplace(stores);
+		const when = yield* parseWhenRange(params.when);
 
-	let productAsins: string[] | null = null;
-	if (params.products) {
-		productAsins = await resolveProducts(params.products, sql);
-		if (productAsins.length === 0) fail("products resolved to zero ASINs");
-	}
+		let productAsins: string[] | null = null;
+		if (params.products) {
+			productAsins = yield* resolveProducts(params.products, sql);
+			if (productAsins.length === 0) return yield* fail("products resolved to zero ASINs");
+		}
 
-	const db = createCanonicalQueryBuilder();
-	const level: CanonicalLevel = groupBy === "family" ? "FAMILY" : "ASIN";
-	function readGroup(
-		group: MarketplaceGroup,
-		window: CanonicalWindow,
-		measures: readonly string[],
-	): Promise<AmazonReportSalesAndTrafficResult> {
-		return readAmazonReportSalesAndTraffic(db, sql, {
-			level,
-			timeGranularity: timeUnit,
-			window,
-			stores: group.stores,
-			asins: productAsins ?? undefined,
-			measures,
-		});
-	}
+		const db = createCanonicalQueryBuilder();
+		const level: CanonicalLevel = groupBy === "family" ? "FAMILY" : "ASIN";
+		function readGroup(
+			group: MarketplaceGroup,
+			window: CanonicalWindow,
+			measures: readonly string[],
+		): Effect.Effect<AmazonReportSalesAndTrafficResult, Error> {
+			return readAmazonReportSalesAndTraffic(db, sql, {
+				level,
+				timeGranularity: timeUnit,
+				window,
+				stores: group.stores,
+				asins: productAsins ?? undefined,
+				measures,
+			});
+		}
 
-	let range: DateRange;
-	if (when.kind === "explicit") {
-		range = when.range;
-	} else {
-		const probes = await Promise.all(
-			marketplaceGroups.map((group) => readGroup(group, { kind: "trailingDays", days: 1 }, ["sessions"])),
+		let range: DateRange;
+		if (when.kind === "explicit") {
+			range = when.range;
+		} else {
+			const probes = yield* Effect.all(
+				marketplaceGroups.map((group) => readGroup(group, { kind: "trailingDays", days: 1 }, ["sessions"])),
+				{ concurrency: "unbounded" },
+			);
+			let earliestDate: string | null = null;
+			for (let index = 0; index < probes.length; index++) {
+				const probe = probes[index];
+				const group = marketplaceGroups[index];
+				if (probe === undefined || group === undefined) {
+					return yield* fail("Internal loadTraffic marketplace probe mismatch");
+				}
+				if (probe.window === null) {
+					return yield* fail(`${group.countryCode}: ${resultError(probe)}`);
+				}
+				if (earliestDate === null || probe.window.dateLast < earliestDate) {
+					earliestDate = probe.window.dateLast;
+				}
+			}
+			if (earliestDate === null) {
+				return yield* fail("No Sales and Traffic marketplaces were resolved");
+			}
+			range = yield* resolveTrailingRange(when.duration, earliestDate);
+		}
+
+		const canonicalResults = yield* Effect.all(
+			marketplaceGroups.map((group) =>
+				readGroup(
+					group,
+					{ kind: "explicit", dateFirst: range.dateFirst, dateLast: range.dateLast },
+					LOAD_TRAFFIC_CANONICAL_MEASURES,
+				)
+			),
+			{ concurrency: "unbounded" },
 		);
-		let earliestDate: string | null = null;
-		for (let index = 0; index < probes.length; index++) {
-			const probe = probes[index];
+		const data: TrafficRow[] = [];
+		for (let index = 0; index < canonicalResults.length; index++) {
+			const result = canonicalResults[index];
 			const group = marketplaceGroups[index];
-			if (probe === undefined || group === undefined) {
-				fail("Internal loadTraffic marketplace probe mismatch");
+			if (result === undefined || group === undefined) {
+				return yield* fail("Internal loadTraffic marketplace result mismatch");
 			}
-			if (probe.window === null) {
-				fail(`${group.countryCode}: ${resultError(probe)}`);
+			if (when.kind === "trailing" && result.window === null) {
+				return yield* fail(`${group.countryCode}: ${resultError(result)}`);
 			}
-			if (earliestDate === null || probe.window.dateLast < earliestDate) {
-				earliestDate = probe.window.dateLast;
+			for (const row of result.rows) {
+				data.push(mapTrafficRow(row, group, groupBy));
 			}
 		}
-		if (earliestDate === null) {
-			fail("No Sales and Traffic marketplaces were resolved");
-		}
-		range = resolveTrailingRange(when.duration, earliestDate);
-	}
+		data.sort((left, right) => compareTrafficRows(left, right, groupBy));
 
-	const canonicalResults = await Promise.all(
-		marketplaceGroups.map((group) =>
-			readGroup(
-				group,
-				{ kind: "explicit", dateFirst: range.dateFirst, dateLast: range.dateLast },
-				LOAD_TRAFFIC_CANONICAL_MEASURES,
-			)
-		),
-	);
-	const data: TrafficRow[] = [];
-	for (let index = 0; index < canonicalResults.length; index++) {
-		const result = canonicalResults[index];
-		const group = marketplaceGroups[index];
-		if (result === undefined || group === undefined) {
-			fail("Internal loadTraffic marketplace result mismatch");
-		}
-		if (when.kind === "trailing" && result.window === null) {
-			fail(`${group.countryCode}: ${resultError(result)}`);
-		}
-		for (const row of result.rows) {
-			data.push(mapTrafficRow(row, group, groupBy));
-		}
-	}
-	data.sort((left, right) => compareTrafficRows(left, right, groupBy));
-
-	return {
-		meta: {
-			dateFirst: range.dateFirst,
-			dateLast: range.dateLast,
-			stores: [...new Set(stores.map((store) => store.countryCode))],
-			rowCount: data.length,
-			groupBy,
-			timeUnit,
-		},
-		data,
-	};
+		return {
+			meta: {
+				dateFirst: range.dateFirst,
+				dateLast: range.dateLast,
+				stores: [...new Set(stores.map((store) => store.countryCode))],
+				rowCount: data.length,
+				groupBy,
+				timeUnit,
+			},
+			data,
+		};
+	});
 }

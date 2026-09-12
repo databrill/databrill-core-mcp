@@ -56,6 +56,7 @@ export type WhenAst = WhenAst_Primitive | WhenAst_Interval;
 export interface WhenAstError {
 	readonly message: string;
 	readonly input: string;
+	readonly cause?: unknown;
 }
 
 export function parseWhenAst(when: string): Either.Either<WhenAst, WhenAstError> {
@@ -75,25 +76,29 @@ export function parseWhenAst(when: string): Either.Either<WhenAst, WhenAstError>
 			return Either.left({ message: "Invalid interval: missing left or right side", input: when });
 		}
 
-		const leftResult = parsePrimitive(leftStr);
-		if (Either.isLeft(leftResult)) {
-			return Either.left({ message: `Invalid interval left side: ${leftResult.left.message}`, input: when });
+		const left = parsePrimitive(leftStr);
+		if (Either.isLeft(left)) {
+			return Either.left({
+				...left.left,
+				message: `Invalid interval left side: ${left.left.message}`,
+				input: when,
+			});
 		}
 
-		const rightResult = parsePrimitive(rightStr);
-		if (Either.isLeft(rightResult)) {
-			return Either.left({ message: `Invalid interval right side: ${rightResult.left.message}`, input: when });
+		const right = parsePrimitive(rightStr);
+		if (Either.isLeft(right)) {
+			return Either.left({
+				...right.left,
+				message: `Invalid interval right side: ${right.left.message}`,
+				input: when,
+			});
 		}
 
-		return makeInterval(leftResult.right, rightResult.right, when);
+		return makeInterval(left.right, right.right, when);
 	}
 
 	// Not an interval, parse as primitive
-	const result = parsePrimitive(trimmed);
-	if (Either.isLeft(result)) {
-		return Either.left({ ...result.left, input: when });
-	}
-	return result;
+	return Either.mapLeft(parsePrimitive(trimmed), (error) => ({ ...error, input: when }));
 }
 
 function findIntervalSeparator(input: string): { readonly index: number; readonly length: number } | null {
@@ -132,12 +137,7 @@ function parsePrimitive(input: string): Either.Either<WhenAst_Primitive, WhenAst
 	}
 
 	// Try duration
-	const duration = tryParseDuration(input);
-	if (duration) {
-		return Either.right(duration);
-	}
-
-	return Either.left({ message: `Unable to parse as date, time, datetime, or duration`, input });
+	return parseDurationAst(input);
 }
 
 function makeInterval(
@@ -240,14 +240,16 @@ function tryParseTime(input: string): WhenAst_Time | null {
 	return null;
 }
 
-function tryParseDuration(input: string): WhenAst_Duration | null {
+function parseDurationAst(input: string): Either.Either<WhenAst_Duration, WhenAstError> {
 	if (!DURATION_PATTERN.test(input)) {
-		return null;
+		return Either.left({ message: "Unable to parse as date, time, datetime, or duration", input });
 	}
-	try {
-		const duration = parseDuration(input);
-		return { ...duration, _tag: "Duration" as const };
-	} catch {
-		return null;
-	}
+	return Either.try({
+		try: () => ({ ...parseDuration(input), _tag: "Duration" as const }),
+		catch: (cause): WhenAstError => ({
+			message: "Unable to parse as date, time, datetime, or duration",
+			input,
+			cause,
+		}),
+	});
 }

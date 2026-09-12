@@ -2,6 +2,8 @@
  * loadTraffic — MCP tool contract (the dbl-metrics-traffic / Sales & Traffic loader).
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadTraffic } from "./load.ts";
 import { type LoadTrafficParams, VALID_TRAFFIC_GROUP_BY, VALID_TRAFFIC_TIME_UNITS } from "./types.ts";
@@ -37,14 +39,16 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadTrafficParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		when: String(args["when"] ?? ""),
-		groupBy: typeof args["groupBy"] === "string" ? args["groupBy"] : undefined,
-		timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
-		products: typeof args["products"] === "string" ? args["products"] : undefined,
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadTrafficParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			when: yield* stringArgument(args["when"], "when"),
+			groupBy: typeof args["groupBy"] === "string" ? args["groupBy"] : undefined,
+			timeUnit: typeof args["timeUnit"] === "string" ? args["timeUnit"] : undefined,
+			products: typeof args["products"] === "string" ? args["products"] : undefined,
+		};
+	});
 }
 
 export const loadTrafficTool = {
@@ -54,5 +58,6 @@ export const loadTrafficTool = {
 		"ordered-product sales, and conversion rate (units/sessions). Bucketed by DAY/WEEK/MONTH across the requested " +
 		"marketplaces. Reads the client DB (amzreport_SALES_AND_TRAFFIC__skuByDay).",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadTraffic(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadTraffic(params, sql)),
 };

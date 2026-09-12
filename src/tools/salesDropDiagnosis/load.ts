@@ -11,6 +11,7 @@
  */
 
 import { Effect } from "effect";
+import { isMissingRelationOrColumn } from "../../effectErrors.ts";
 import type { Sql } from "postgres";
 import {
 	discoverConfiguredCountries,
@@ -315,15 +316,15 @@ function attachInventory(diagnoses: StoreDiagnosis[], rows: LowInventoryRow[], r
 	}
 }
 
-export function load(config: LoadConfig, sql: Sql): Effect.Effect<StoreDiagnosis[]> {
+export function load(config: LoadConfig, sql: Sql): Effect.Effect<StoreDiagnosis[], Error> {
 	return Effect.gen(function* () {
 		const lookback = config.recentDays + config.baselineDays;
 
-		const merchantIds = yield* Effect.promise(() => discoverMerchantIds(sql));
-		const configured = yield* Effect.promise(() => discoverConfiguredCountries(sql));
+		const merchantIds = yield* discoverMerchantIds(sql);
+		const configured = yield* discoverConfiguredCountries(sql);
 
 		const since = sinceDaysAgo(lookback + 5);
-		const stores = yield* Effect.promise(() => loadStoreSeries(sql, merchantIds, since));
+		const stores = yield* loadStoreSeries(sql, merchantIds, since);
 
 		const out: StoreDiagnosis[] = [];
 		for (const sd of stores) {
@@ -400,8 +401,8 @@ export function load(config: LoadConfig, sql: Sql): Effect.Effect<StoreDiagnosis
 		// Best-effort: a missing inventory table degrades to no flags, never sinks
 		// the whole diagnosis.
 		if (!config.skipInventory && out.length > 0) {
-			const invRows = yield* Effect.promise(() => loadLowInventory(sql, resolvedStoresFor(out), 7)).pipe(
-				Effect.catchAllCause(() => Effect.succeed([] as LowInventoryRow[])),
+			const invRows = yield* loadLowInventory(sql, resolvedStoresFor(out), 7).pipe(
+				Effect.catchIf(isMissingRelationOrColumn, () => Effect.succeed<LowInventoryRow[]>([])),
 			);
 			attachInventory(out, invRows, config.inventoryRunwayMax);
 		}

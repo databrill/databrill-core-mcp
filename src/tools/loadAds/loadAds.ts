@@ -1,5 +1,7 @@
+import { Effect, Either } from "effect";
+import { tryOrOperationError } from "../../effectErrors.ts";
 import type postgres from "postgres";
-import { Either, Schema } from "effect";
+import { Schema } from "effect";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import {
 	type AliasedExpression,
@@ -138,8 +140,8 @@ export class LoadAdsError extends Error {
 	}
 }
 
-function fail(msg: string): never {
-	throw new LoadAdsError(msg);
+function fail(msg: string): Either.Either<never, Error> {
+	return Either.left(new LoadAdsError(msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -181,95 +183,100 @@ function resolveScope(raw: string): AmazonMarketplaceInfo[] {
 // from amazon_store (the static marketplace constants supply currency and the
 // storefront label). Merchant IDs contain no '-', so splitting on the first
 // '-' is unambiguous.
-export async function resolveStores(spec: string, sql: postgres.Sql): Promise<ResolvedStore[]> {
-	// One builder per invocation; it is where a future `.withSchema(workspaceSchema)` would attach.
-	const db = createCanonicalQueryBuilder();
-	const rows = await runCompiled(
-		sql,
-		db
-			.selectFrom("amazon_store")
-			.select(["merchantId", "marketplaceId", "storeName"])
-			// Both columns are non-null `boolean`, so `= true` says exactly what the bare
-			// `WHERE "isReal" AND "isActive"` said — and each binds a parameter, which is
-			// what keeps this query off postgres.js's SIMPLE protocol.
-			.where("isReal", "=", true)
-			.where("isActive", "=", true)
-			.compile(),
-	);
+export function resolveStores(spec: string, sql: postgres.Sql): Effect.Effect<ResolvedStore[], Error> {
+	return Effect.gen(function* () {
+		// One builder per invocation; it is where a future `.withSchema(workspaceSchema)` would attach.
+		const db = createCanonicalQueryBuilder();
+		const rows = yield* runCompiled(
+			sql,
+			() =>
+				db
+					.selectFrom("amazon_store")
+					.select(["merchantId", "marketplaceId", "storeName"])
+					// Both columns are non-null `boolean`, so `= true` says exactly what the bare
+					// `WHERE "isReal" AND "isActive"` said — and each binds a parameter, which is
+					// what keeps this query off postgres.js's SIMPLE protocol.
+					.where("isReal", "=", true)
+					.where("isActive", "=", true)
+					.compile(),
+		);
 
-	// marketplaceId -> merchants selling there; plus merchantId -> name lookup
-	const merchantsByMarketplace = new Map<string, { merchantId: string; merchantName: string }[]>();
-	const knownMerchantIds = new Set<string>();
-	const merchantNameById = new Map<string, string>();
-	for (const r of rows) {
-		knownMerchantIds.add(r.merchantId);
-		merchantNameById.set(r.merchantId, r.storeName);
-		const arr = merchantsByMarketplace.get(r.marketplaceId) ?? [];
-		if (!arr.some((m) => m.merchantId === r.merchantId)) {
-			arr.push({ merchantId: r.merchantId, merchantName: r.storeName });
+		// marketplaceId -> merchants selling there; plus merchantId -> name lookup
+		const merchantsByMarketplace = new Map<string, { merchantId: string; merchantName: string }[]>();
+		const knownMerchantIds = new Set<string>();
+		const merchantNameById = new Map<string, string>();
+		for (const r of rows) {
+			knownMerchantIds.add(r.merchantId);
+			merchantNameById.set(r.merchantId, r.storeName);
+			const arr = merchantsByMarketplace.get(r.marketplaceId) ?? [];
+			if (!arr.some((m) => m.merchantId === r.merchantId)) {
+				arr.push({ merchantId: r.merchantId, merchantName: r.storeName });
+			}
+			merchantsByMarketplace.set(r.marketplaceId, arr);
 		}
-		merchantsByMarketplace.set(r.marketplaceId, arr);
-	}
 
-	const seen = new Set<string>(); // `${merchantId}\t${marketplaceId}`
-	const result: ResolvedStore[] = [];
+		const seen = new Set<string>(); // `${merchantId}\t${marketplaceId}`
+		const result: ResolvedStore[] = [];
 
-	const pushStore = (merchantId: string, merchantName: string, info: AmazonMarketplaceInfo) => {
-		const key = `${merchantId}\t${info.marketplaceId}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-		result.push({
-			merchantId,
-			merchantName,
-			marketplaceId: info.marketplaceId,
-			countryCode: info.countryCode,
-			currency: info.defaultCurrencyCode,
-			storeName: `Amazon.${info.domainName.replace("www.amazon.", "")}`,
-		});
-	};
+		const pushStore = (merchantId: string, merchantName: string, info: AmazonMarketplaceInfo) => {
+			const key = `${merchantId}\t${info.marketplaceId}`;
+			if (seen.has(key)) return;
+			seen.add(key);
+			result.push({
+				merchantId,
+				merchantName,
+				marketplaceId: info.marketplaceId,
+				countryCode: info.countryCode,
+				currency: info.defaultCurrencyCode,
+				storeName: `Amazon.${info.domainName.replace("www.amazon.", "")}`,
+			});
+		};
 
-	const tokens = spec.split(",").map((s) => s.trim()).filter(Boolean);
-	for (const token of tokens) {
-		const dashIdx = token.indexOf("-");
-		if (dashIdx > 0) {
-			// {merchantId}-{scope}
-			const merchantId = token.slice(0, dashIdx);
-			const scope = token.slice(dashIdx + 1);
-			if (!knownMerchantIds.has(merchantId)) {
-				fail(
-					`Unknown merchant '${merchantId}' in store token '${token}'. Known merchants come from amazon_store.`,
-				);
-			}
-			const infos = resolveScope(scope);
-			if (infos.length === 0) {
-				fail(
-					`Unknown store scope '${scope}' in token '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, or *.`,
-				);
-			}
-			const merchantName = merchantNameById.get(merchantId)!;
-			for (const info of infos) {
-				const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
-				if (ms.some((m) => m.merchantId === merchantId)) {
-					pushStore(merchantId, merchantName, info);
+		const tokens = spec.split(",").map((s) => s.trim()).filter(Boolean);
+		for (const token of tokens) {
+			const dashIdx = token.indexOf("-");
+			if (dashIdx > 0) {
+				// {merchantId}-{scope}
+				const merchantId = token.slice(0, dashIdx);
+				const scope = token.slice(dashIdx + 1);
+				if (!knownMerchantIds.has(merchantId)) {
+					return yield* fail(
+						`Unknown merchant '${merchantId}' in store token '${token}'. Known merchants come from amazon_store.`,
+					);
+				}
+				const infos = resolveScope(scope);
+				if (infos.length === 0) {
+					return yield* fail(
+						`Unknown store scope '${scope}' in token '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, or *.`,
+					);
+				}
+				const merchantName = merchantNameById.get(merchantId)!;
+				for (const info of infos) {
+					const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
+					if (ms.some((m) => m.merchantId === merchantId)) {
+						pushStore(merchantId, merchantName, info);
+					}
+				}
+			} else {
+				// Bare scope -> every merchant selling in the resolved marketplace(s)
+				const infos = resolveScope(token);
+				if (infos.length === 0) {
+					return yield* fail(
+						`Unknown store '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, '*', or '{merchantId}-{scope}'.`,
+					);
+				}
+				for (const info of infos) {
+					const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
+					for (const m of ms) pushStore(m.merchantId, m.merchantName, info);
 				}
 			}
-		} else {
-			// Bare scope -> every merchant selling in the resolved marketplace(s)
-			const infos = resolveScope(token);
-			if (infos.length === 0) {
-				fail(
-					`Unknown store '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, '*', or '{merchantId}-{scope}'.`,
-				);
-			}
-			for (const info of infos) {
-				const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
-				for (const m of ms) pushStore(m.merchantId, m.merchantName, info);
-			}
 		}
-	}
 
-	if (result.length === 0) fail("No stores resolved (no active merchant sells in the requested marketplace[s])");
-	return result;
+		if (result.length === 0) {
+			return yield* fail("No stores resolved (no active merchant sells in the requested marketplace[s])");
+		}
+		return result;
+	});
 }
 
 // Distinct marketplaces among the resolved stores (multiple merchants can
@@ -303,154 +310,168 @@ function distinctMerchants(stores: ResolvedStore[]): ResolvedStore[] {
 // When Resolution
 // ---------------------------------------------------------------------------
 
-function addDurationDays(dateStr: string, dur: WhenAst_Duration, sign: 1 | -1): string {
-	const d = new Date(dateStr + "T00:00:00Z");
-	if (dur.years) d.setUTCFullYear(d.getUTCFullYear() + sign * dur.years);
-	if (dur.months) d.setUTCMonth(d.getUTCMonth() + sign * dur.months);
-	if (dur.weeks) d.setUTCDate(d.getUTCDate() + sign * dur.weeks * 7);
-	if (dur.days) d.setUTCDate(d.getUTCDate() + sign * dur.days);
-	// Offset by 1 day to make both ends inclusive
-	d.setUTCDate(d.getUTCDate() - sign * 1);
-	return d.toISOString().slice(0, 10);
+function addDurationDays(dateStr: string, dur: WhenAst_Duration, sign: 1 | -1): Either.Either<string, Error> {
+	return tryOrOperationError(() => {
+		const d = new Date(dateStr + "T00:00:00Z");
+		if (dur.years) d.setUTCFullYear(d.getUTCFullYear() + sign * dur.years);
+		if (dur.months) d.setUTCMonth(d.getUTCMonth() + sign * dur.months);
+		if (dur.weeks) d.setUTCDate(d.getUTCDate() + sign * dur.weeks * 7);
+		if (dur.days) d.setUTCDate(d.getUTCDate() + sign * dur.days);
+		// Offset by 1 day to make both ends inclusive
+		d.setUTCDate(d.getUTCDate() - sign * 1);
+		return d.toISOString().slice(0, 10);
+	});
 }
 
-function extractDate(node: { readonly _tag: string; readonly date?: string; readonly datetime?: string }): string {
-	if ("date" in node && node.date) return node.date;
-	if ("datetime" in node && node.datetime) return node.datetime.slice(0, 10);
-	throw new Error(`Cannot extract date from ${node._tag}`);
+function extractDate(node: { readonly date: string } | { readonly datetime: string }): string {
+	return "date" in node ? node.date : node.datetime.slice(0, 10);
 }
 
-export function parseWhenRange(whenStr: string): ParsedWhenRange {
-	const parsed = parseWhenAst(whenStr);
-	if (Either.isLeft(parsed)) {
-		fail(`Invalid --when: ${parsed.left.message}`);
-	}
-	const ast = parsed.right;
+export function parseWhenRange(whenStr: string): Either.Either<ParsedWhenRange, Error> {
+	return Either.gen(function* () {
+		const ast = yield* parseWhenAst(whenStr).pipe(
+			Either.mapLeft((cause) => Object.assign(new LoadAdsError(`Invalid --when: ${cause.message}`), { cause })),
+		);
 
-	switch (ast._tag) {
-		case "Interval_DateDate":
-			return { kind: "explicit", range: { dateFirst: ast.left.date, dateLast: ast.right.date } };
+		switch (ast._tag) {
+			case "Interval_DateDate":
+				return { kind: "explicit", range: { dateFirst: ast.left.date, dateLast: ast.right.date } };
 
-		case "Interval_DateTimeDatetime":
-			return {
-				kind: "explicit",
-				range: {
-					dateFirst: ast.left.datetime.slice(0, 10),
-					dateLast: ast.right.datetime.slice(0, 10),
-				},
-			};
+			case "Interval_DateTimeDatetime":
+				return {
+					kind: "explicit",
+					range: {
+						dateFirst: ast.left.datetime.slice(0, 10),
+						dateLast: ast.right.datetime.slice(0, 10),
+					},
+				};
 
-		case "Interval_DateDuration": {
-			const from = extractDate(ast.left);
-			const to = addDurationDays(from, ast.right, 1);
-			return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
+			case "Interval_DateDuration": {
+				const from = extractDate(ast.left);
+				const to = yield* addDurationDays(from, ast.right, 1);
+				return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
+			}
+
+			case "Interval_DurationDate": {
+				const to = extractDate(ast.right);
+				const from = yield* addDurationDays(to, ast.left, -1);
+				return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
+			}
+
+			case "Duration":
+				return { kind: "trailing", duration: ast };
+
+			default:
+				return yield* fail(`Unsupported --when format: ${ast._tag}`);
 		}
-
-		case "Interval_DurationDate": {
-			const to = extractDate(ast.right);
-			const from = addDurationDays(to, ast.left, -1);
-			return { kind: "explicit", range: { dateFirst: from, dateLast: to } };
-		}
-
-		case "Duration":
-			return { kind: "trailing", duration: ast };
-
-		default:
-			fail(`Unsupported --when format: ${ast._tag}`);
-	}
+	});
 }
 
 /** Resolve a bare duration against a source-specific inclusive end date. */
-export function resolveTrailingRange(duration: WhenAst_Duration, dateLast: string): DateRange {
-	return { dateFirst: addDurationDays(dateLast, duration, -1), dateLast };
+export function resolveTrailingRange(duration: WhenAst_Duration, dateLast: string): Either.Either<DateRange, Error> {
+	return Either.gen(function* () {
+		return { dateFirst: yield* addDurationDays(dateLast, duration, -1), dateLast };
+	});
 }
 
-export async function resolveWhen(
+export function resolveWhen(
 	whenStr: string,
 	sql: postgres.Sql,
-): Promise<DateRange> {
-	const request = parseWhenRange(whenStr);
-	if (request.kind === "explicit") {
-		return request.range;
-	}
+): Effect.Effect<DateRange, Error> {
+	return Effect.gen(function* () {
+		const request = yield* parseWhenRange(whenStr);
+		if (request.kind === "explicit") {
+			return request.range;
+		}
 
-	// Duration alone: end = latest advertising data date. Source-specific
-	// consumers such as loadTraffic parse the same request and provide their own
-	// definitive end date instead of calling this advertising fallback.
-	const db = createCanonicalQueryBuilder();
-	const latestRow = await runCompiled(
-		sql,
-		db
-			.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
-			.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
-			// A database-wide MAX has no natural value to bind, and an empty parameter
-			// list is what selects postgres.js's SIMPLE protocol. `boundTrue()` supplies one.
-			.where(boundTrue())
-			.compile(),
-	);
-	const latest = latestRow[0]?.latest;
-	if (!latest) fail("No ad data found in database");
-	return resolveTrailingRange(request.duration, latest);
+		// Duration alone: end = latest advertising data date. Source-specific
+		// consumers such as loadTraffic parse the same request and provide their own
+		// definitive end date instead of calling this advertising fallback.
+		const db = createCanonicalQueryBuilder();
+		const latestRow = yield* runCompiled(
+			sql,
+			() =>
+				db
+					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+					.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
+					// A database-wide MAX has no natural value to bind, and an empty parameter
+					// list is what selects postgres.js's SIMPLE protocol. `boundTrue()` supplies one.
+					.where(boundTrue())
+					.compile(),
+		);
+		const latest = latestRow[0]?.latest;
+		if (!latest) return yield* fail("No ad data found in database");
+		return (yield* resolveTrailingRange(request.duration, latest));
+	});
 }
 
 // ---------------------------------------------------------------------------
 // Products Resolution
 // ---------------------------------------------------------------------------
 
-export async function resolveProducts(
+export function resolveProducts(
 	productsStr: string,
 	sql: postgres.Sql,
-): Promise<string[]> {
-	const db = createCanonicalQueryBuilder();
-	const tokens = productsStr.split(",").map((s) => s.trim()).filter(Boolean);
-	const childAsins = new Set<string>();
+): Effect.Effect<string[], Error> {
+	return Effect.gen(function* () {
+		const db = createCanonicalQueryBuilder();
+		const tokens = productsStr.split(",").map((s) => s.trim()).filter(Boolean);
+		const childAsins = new Set<string>();
 
-	for (const token of tokens) {
-		if (ASIN_PATTERN.test(token)) {
-			// Check if parent ASIN -> expand to children
-			const children = await runCompiled(
-				sql,
-				db
-					.selectFrom("amzspapi_catalog_items_v20220401__catalogitem")
-					.select("asin")
-					.where("parent_asin", "=", token)
-					.compile(),
-			);
-			if (children.length > 0) {
-				for (const row of children) childAsins.add(row.asin);
+		for (const token of tokens) {
+			if (ASIN_PATTERN.test(token)) {
+				// Check if parent ASIN -> expand to children
+				const children = yield* runCompiled(
+					sql,
+					() =>
+						db
+							.selectFrom("amzspapi_catalog_items_v20220401__catalogitem")
+							.select("asin")
+							.where("parent_asin", "=", token)
+							.compile(),
+				);
+				if (children.length > 0) {
+					for (const row of children) childAsins.add(row.asin);
+				} else {
+					// Treat as child ASIN directly
+					childAsins.add(token);
+				}
 			} else {
-				// Treat as child ASIN directly
-				childAsins.add(token);
+				// Family name lookup
+				const rows = yield* runCompiled(
+					sql,
+					() =>
+						db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token)
+							.compile(),
+				);
+				if (rows.length === 0) {
+					console.error(`Warning: no ASINs found for family '${token}'`);
+				}
+				for (const row of rows) childAsins.add(row.asin);
 			}
-		} else {
-			// Family name lookup
-			const rows = await runCompiled(
-				sql,
-				db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token).compile(),
-			);
-			if (rows.length === 0) {
-				console.error(`Warning: no ASINs found for family '${token}'`);
-			}
-			for (const row of rows) childAsins.add(row.asin);
 		}
-	}
 
-	return [...childAsins];
+		return [...childAsins];
+	});
 }
 
 // ---------------------------------------------------------------------------
 // Filter Parsing
 // ---------------------------------------------------------------------------
 
-function parseFilter(filterStr: string): FilterExpr {
-	const parts = filterStr.split(":");
-	if (parts.length < 3) fail(`Invalid --filter format: '${filterStr}'. Expected 'field:op:value'`);
-	const field = parts[0];
-	const op = parts[1];
-	const value = parts.slice(2).join(":");
-	if (op !== "=") fail(`Unsupported filter operator '${op}'. Only '=' is supported`);
-	if (field !== "campaignName") fail(`Unsupported filter field '${field}'. Only 'campaignName' is supported`);
-	return { field, op, value };
+function parseFilter(filterStr: string): Either.Either<FilterExpr, Error> {
+	return Either.gen(function* () {
+		const parts = filterStr.split(":");
+		if (parts.length < 3) return yield* fail(`Invalid --filter format: '${filterStr}'. Expected 'field:op:value'`);
+		const field = parts[0];
+		const op = parts[1];
+		const value = parts.slice(2).join(":");
+		if (op !== "=") return yield* fail(`Unsupported filter operator '${op}'. Only '=' is supported`);
+		if (field !== "campaignName") {
+			return yield* fail(`Unsupported filter field '${field}'. Only 'campaignName' is supported`);
+		}
+		return { field, op, value };
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -722,16 +743,18 @@ function caseOverRef(
 	rows: readonly ResolvedStore[],
 	match: (store: ResolvedStore) => string,
 	label: (store: ResolvedStore) => string,
-): DimExpression<string | null> {
-	const first = rows[0];
-	// `resolveStores` fails rather than returning an empty list, so this is
-	// unreachable; the string-built version emitted `CASE  END`, a syntax error.
-	if (!first) fail("No stores resolved");
-	let expr = xb.case().when(ksql.ref<string>(ref), "=", match(first)).then(textVal(label(first)));
-	for (const row of rows.slice(1)) {
-		expr = expr.when(ksql.ref<string>(ref), "=", match(row)).then(textVal(label(row)));
-	}
-	return expr.end();
+): Either.Either<DimExpression<string | null>, Error> {
+	return Either.gen(function* () {
+		const first = rows[0];
+		// `resolveStores` fails rather than returning an empty list, so this is
+		// unreachable; the string-built version emitted `CASE  END`, a syntax error.
+		if (!first) return yield* fail("No stores resolved");
+		let expr = xb.case().when(ksql.ref<string>(ref), "=", match(first)).then(textVal(label(first)));
+		for (const row of rows.slice(1)) {
+			expr = expr.when(ksql.ref<string>(ref), "=", match(row)).then(textVal(label(row)));
+		}
+		return expr.end();
+	});
 }
 
 function marketplaceIdGroupBy(): GroupByEntry {
@@ -747,122 +770,124 @@ function buildDimExprs(
 	dims: GroupByDim[],
 	stores: ResolvedStore[],
 	resolvedAsin: RawBuilder<string>,
-): DimExprs {
-	const selectExprs: AliasedExpression<unknown, string>[] = [];
-	const groupBy: GroupByEntry[] = [];
+): Either.Either<DimExprs, Error> {
+	return Either.gen(function* () {
+		const selectExprs: AliasedExpression<unknown, string>[] = [];
+		const groupBy: GroupByEntry[] = [];
 
-	for (const dim of dims) {
-		switch (dim) {
-			case "asin":
-				selectExprs.push(resolvedAsin.as("asin"));
-				groupBy.push({ key: "resolvedAsin", expr: resolvedAsin });
-				break;
-			case "family":
-				selectExprs.push(ksql.ref<string | null>("fam.family").as("family"));
-				groupBy.push({ key: `fam.family`, expr: ksql.ref("fam.family") });
-				break;
-			case "parentAsin":
-				selectExprs.push(ksql.ref<string | null>("cat.parent_asin").as("parentAsin"));
-				groupBy.push({ key: `cat.parent_asin`, expr: ksql.ref("cat.parent_asin") });
-				break;
-			case "campaign":
-				selectExprs.push(ksql.ref<string>("r.campaignId").as("campaignId"));
-				selectExprs.push(ksql.ref<string | null>("camp.name").as("campaignName"));
-				groupBy.push({ key: `r."campaignId"`, expr: ksql.ref("r.campaignId") });
-				groupBy.push({ key: `camp.name`, expr: ksql.ref("camp.name") });
-				break;
-			case "adType": {
-				// The same nested CASE object is used in two THEN branches; expression
-				// objects are immutable AST wrappers, so sharing one is safe and each
-				// position compiles its own placeholder numbering.
-				const sbOrSbv = xb.case()
-					.when(xb(ksql.ref<string>("ad.adType"), "in", ["VIDEO", "BRAND_VIDEO"]))
-					.then(textVal("SBV"))
-					.else(textVal("SB"))
-					.end();
-				selectExprs.push(
-					xb.case()
-						.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_PRODUCTS").then(textVal("SP"))
-						.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_DISPLAY").then(textVal("SD"))
-						.when(ksql.ref<string>("camp.adProduct"), "in", [
-							"SPONSORED_BRANDS",
-							"SPONSORED_BRANDS_VIDEO",
-						]).then(sbOrSbv)
-						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Products").then(textVal("SP"))
-						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Display").then(textVal("SD"))
-						.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Brands").then(sbOrSbv)
-						.else(xb.fn.coalesce(ksql.ref<string>("camp.adProduct"), ksql.ref<string>("r.adProduct")))
-						.end()
-						.as("adType"),
-				);
-				groupBy.push({ key: `camp."adProduct"`, expr: ksql.ref("camp.adProduct") });
-				groupBy.push({ key: `ad."adType"`, expr: ksql.ref("ad.adType") });
-				groupBy.push({ key: `r."adProduct"`, expr: ksql.ref("r.adProduct") });
-				break;
+		for (const dim of dims) {
+			switch (dim) {
+				case "asin":
+					selectExprs.push(resolvedAsin.as("asin"));
+					groupBy.push({ key: "resolvedAsin", expr: resolvedAsin });
+					break;
+				case "family":
+					selectExprs.push(ksql.ref<string | null>("fam.family").as("family"));
+					groupBy.push({ key: `fam.family`, expr: ksql.ref("fam.family") });
+					break;
+				case "parentAsin":
+					selectExprs.push(ksql.ref<string | null>("cat.parent_asin").as("parentAsin"));
+					groupBy.push({ key: `cat.parent_asin`, expr: ksql.ref("cat.parent_asin") });
+					break;
+				case "campaign":
+					selectExprs.push(ksql.ref<string>("r.campaignId").as("campaignId"));
+					selectExprs.push(ksql.ref<string | null>("camp.name").as("campaignName"));
+					groupBy.push({ key: `r."campaignId"`, expr: ksql.ref("r.campaignId") });
+					groupBy.push({ key: `camp.name`, expr: ksql.ref("camp.name") });
+					break;
+				case "adType": {
+					// The same nested CASE object is used in two THEN branches; expression
+					// objects are immutable AST wrappers, so sharing one is safe and each
+					// position compiles its own placeholder numbering.
+					const sbOrSbv = xb.case()
+						.when(xb(ksql.ref<string>("ad.adType"), "in", ["VIDEO", "BRAND_VIDEO"]))
+						.then(textVal("SBV"))
+						.else(textVal("SB"))
+						.end();
+					selectExprs.push(
+						xb.case()
+							.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_PRODUCTS").then(textVal("SP"))
+							.when(ksql.ref<string>("camp.adProduct"), "=", "SPONSORED_DISPLAY").then(textVal("SD"))
+							.when(ksql.ref<string>("camp.adProduct"), "in", [
+								"SPONSORED_BRANDS",
+								"SPONSORED_BRANDS_VIDEO",
+							]).then(sbOrSbv)
+							.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Products").then(textVal("SP"))
+							.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Display").then(textVal("SD"))
+							.when(ksql.ref<string>("r.adProduct"), "=", "Sponsored Brands").then(sbOrSbv)
+							.else(xb.fn.coalesce(ksql.ref<string>("camp.adProduct"), ksql.ref<string>("r.adProduct")))
+							.end()
+							.as("adType"),
+					);
+					groupBy.push({ key: `camp."adProduct"`, expr: ksql.ref("camp.adProduct") });
+					groupBy.push({ key: `ad."adType"`, expr: ksql.ref("ad.adType") });
+					groupBy.push({ key: `r."adProduct"`, expr: ksql.ref("r.adProduct") });
+					break;
+				}
+				case "placement":
+					selectExprs.push(ksql.ref<string>("r.placementClassification").as("placement"));
+					groupBy.push({
+						key: `r."placementClassification"`,
+						expr: ksql.ref("r.placementClassification"),
+					});
+					break;
+				case "target":
+					selectExprs.push(ksql.ref<string>("r.target").as("target"));
+					groupBy.push({ key: `r.target`, expr: ksql.ref("r.target") });
+					break;
+				case "adgroup":
+					selectExprs.push(ksql.ref<string>("r.adGroupId").as("adGroupId"));
+					groupBy.push({ key: `r."adGroupId"`, expr: ksql.ref("r.adGroupId") });
+					break;
+				case "country":
+					// marketplaceId -> country code, from the static marketplace constants.
+					selectExprs.push(
+						(yield* caseOverRef(
+							"r.marketplaceId",
+							distinctMarketplaces(stores),
+							(s) => s.marketplaceId,
+							(s) => s.countryCode,
+						)).as("country"),
+					);
+					groupBy.push(marketplaceIdGroupBy());
+					break;
+				case "store":
+					// Storefront label per marketplace (e.g. Amazon.de). `storeName` here is
+					// built by `resolveStores` from the static marketplace `domainName`, NOT
+					// from `amazon_store."storeName"`.
+					selectExprs.push(
+						(yield* caseOverRef(
+							"r.marketplaceId",
+							distinctMarketplaces(stores),
+							(s) => s.marketplaceId,
+							(s) => s.storeName,
+						)).as("store"),
+					);
+					groupBy.push(marketplaceIdGroupBy());
+					break;
+				case "merchant":
+					// Seller account: merchantId + its amazon_store name. Both are read out of
+					// `amazon_store`, and both were already bound before this conversion.
+					selectExprs.push(ksql.ref<string>("r.merchantId").as("merchantId"));
+					selectExprs.push(
+						(yield* caseOverRef(
+							"r.merchantId",
+							distinctMerchants(stores),
+							(s) => s.merchantId,
+							(s) => s.merchantName,
+						)).as("merchantName"),
+					);
+					groupBy.push({ key: `r."merchantId"`, expr: ksql.ref("r.merchantId") });
+					break;
+				case "marketplaceId":
+					selectExprs.push(ksql.ref<string>("r.marketplaceId").as("marketplaceId"));
+					groupBy.push(marketplaceIdGroupBy());
+					break;
 			}
-			case "placement":
-				selectExprs.push(ksql.ref<string>("r.placementClassification").as("placement"));
-				groupBy.push({
-					key: `r."placementClassification"`,
-					expr: ksql.ref("r.placementClassification"),
-				});
-				break;
-			case "target":
-				selectExprs.push(ksql.ref<string>("r.target").as("target"));
-				groupBy.push({ key: `r.target`, expr: ksql.ref("r.target") });
-				break;
-			case "adgroup":
-				selectExprs.push(ksql.ref<string>("r.adGroupId").as("adGroupId"));
-				groupBy.push({ key: `r."adGroupId"`, expr: ksql.ref("r.adGroupId") });
-				break;
-			case "country":
-				// marketplaceId -> country code, from the static marketplace constants.
-				selectExprs.push(
-					caseOverRef(
-						"r.marketplaceId",
-						distinctMarketplaces(stores),
-						(s) => s.marketplaceId,
-						(s) => s.countryCode,
-					).as("country"),
-				);
-				groupBy.push(marketplaceIdGroupBy());
-				break;
-			case "store":
-				// Storefront label per marketplace (e.g. Amazon.de). `storeName` here is
-				// built by `resolveStores` from the static marketplace `domainName`, NOT
-				// from `amazon_store."storeName"`.
-				selectExprs.push(
-					caseOverRef(
-						"r.marketplaceId",
-						distinctMarketplaces(stores),
-						(s) => s.marketplaceId,
-						(s) => s.storeName,
-					).as("store"),
-				);
-				groupBy.push(marketplaceIdGroupBy());
-				break;
-			case "merchant":
-				// Seller account: merchantId + its amazon_store name. Both are read out of
-				// `amazon_store`, and both were already bound before this conversion.
-				selectExprs.push(ksql.ref<string>("r.merchantId").as("merchantId"));
-				selectExprs.push(
-					caseOverRef(
-						"r.merchantId",
-						distinctMerchants(stores),
-						(s) => s.merchantId,
-						(s) => s.merchantName,
-					).as("merchantName"),
-				);
-				groupBy.push({ key: `r."merchantId"`, expr: ksql.ref("r.merchantId") });
-				break;
-			case "marketplaceId":
-				selectExprs.push(ksql.ref<string>("r.marketplaceId").as("marketplaceId"));
-				groupBy.push(marketplaceIdGroupBy());
-				break;
 		}
-	}
 
-	return { selectExprs, groupBy };
+		return { selectExprs, groupBy };
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -872,18 +897,20 @@ function buildDimExprs(
 // `currency` and `marketplaceId` both come from the static `amazonConstants` marketplace
 // table, never from the DB or from caller text. They were interpolated as quoted SQL
 // literals and are now bound, which is strictly safer; neither form reaches a GROUP BY.
-function currencyCaseExpr(stores: ResolvedStore[]): AliasedExpression<string | null, string> {
-	const currencies = new Set(stores.map((s) => s.currency));
-	if (currencies.size <= 1) {
-		const only = stores[0]?.currency ?? "";
-		return textVal(only).as("currency");
-	}
-	return caseOverRef(
-		"r.marketplaceId",
-		distinctMarketplaces(stores),
-		(s) => s.marketplaceId,
-		(s) => s.currency,
-	).as("currency");
+function currencyCaseExpr(stores: ResolvedStore[]): Either.Either<AliasedExpression<string | null, string>, Error> {
+	return Either.gen(function* () {
+		const currencies = new Set(stores.map((s) => s.currency));
+		if (currencies.size <= 1) {
+			const only = stores[0]?.currency ?? "";
+			return textVal(only).as("currency");
+		}
+		return (yield* caseOverRef(
+			"r.marketplaceId",
+			distinctMarketplaces(stores),
+			(s) => s.marketplaceId,
+			(s) => s.currency,
+		)).as("currency");
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -991,71 +1018,74 @@ function buildQuery1(
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
 ) {
-	const plan = dimPlan(dims);
-	const productGrain = isProductGrain(dims);
-	// One expression object, reused in the SELECT list, the GROUP BY, the two
-	// optional joins and the `--products` predicate: identical text everywhere.
-	const resolvedAsin = resolvedAsinExpr();
-	const dims1 = buildDimExprs(dims, stores, resolvedAsin);
+	return Either.gen(function* () {
+		const plan = dimPlan(dims);
+		const productGrain = isProductGrain(dims);
+		// One expression object, reused in the SELECT list, the GROUP BY, the two
+		// optional joins and the `--products` predicate: identical text everywhere.
+		const resolvedAsin = resolvedAsinExpr();
+		const dims1 = yield* buildDimExprs(dims, stores, resolvedAsin);
+		const currency = yield* currencyCaseExpr(stores);
 
-	const groupByCols: GroupByEntry[] = [];
-	// Currency grouping (for multi-store)
-	if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
-	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
-	groupByCols.push(...dims1.groupBy);
+		const groupByCols: GroupByEntry[] = [];
+		// Currency grouping (for multi-store)
+		if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
+		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
+		groupByCols.push(...dims1.groupBy);
 
-	let query = query1Base(db, stores, queryJoins(plan, filter))
-		.select((eb) => [
-			currencyCaseExpr(stores),
-			...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
-			...dims1.selectExprs,
-			// Advertised metrics
-			eb.fn.sum<string | null>("r.impressions").as("impressions"),
-			eb.fn.sum<string | null>("r.clicks").as("clicks"),
-			eb.fn.sum<string | null>("r.addToCart").as("addToCart"),
-			eb.fn.sum<string | null>("r.purchases").as("purchases"),
-			eb.fn.sum<string | null>("r.unitsSold").as("units"),
-			// The cast is on the COLUMN, INSIDE the aggregate, as `SUM(r."totalCost"::float)`
-			// was: `cast(sum(...) as float8)` would add `numeric` exactly and round once,
-			// which is a different number in the last bits.
-			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.totalCost"), "float8")).as("spend"),
-			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenue"),
-			// Halo-out metrics
-			eb.fn.sum<string | null>("r.purchasesHalo").as("purchasesHaloOut"),
-			eb.fn.sum<string | null>("r.unitsSoldHalo").as("unitsHaloOut"),
-			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.salesHalo"), "float8")).as("revenueHaloOut"),
-		])
-		.where((eb) =>
-			eb(
-				eb.refTuple("r.merchantId", "r.marketplaceId"),
-				"in",
-				stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+		let query = query1Base(db, stores, queryJoins(plan, filter))
+			.select((eb) => [
+				currency,
+				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
+				...dims1.selectExprs,
+				// Advertised metrics
+				eb.fn.sum<string | null>("r.impressions").as("impressions"),
+				eb.fn.sum<string | null>("r.clicks").as("clicks"),
+				eb.fn.sum<string | null>("r.addToCart").as("addToCart"),
+				eb.fn.sum<string | null>("r.purchases").as("purchases"),
+				eb.fn.sum<string | null>("r.unitsSold").as("units"),
+				// The cast is on the COLUMN, INSIDE the aggregate, as `SUM(r."totalCost"::float)`
+				// was: `cast(sum(...) as float8)` would add `numeric` exactly and round once,
+				// which is a different number in the last bits.
+				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.totalCost"), "float8")).as("spend"),
+				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenue"),
+				// Halo-out metrics
+				eb.fn.sum<string | null>("r.purchasesHalo").as("purchasesHaloOut"),
+				eb.fn.sum<string | null>("r.unitsSoldHalo").as("unitsHaloOut"),
+				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.salesHalo"), "float8")).as("revenueHaloOut"),
+			])
+			.where((eb) =>
+				eb(
+					eb.refTuple("r.merchantId", "r.marketplaceId"),
+					"in",
+					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+				)
 			)
-		)
-		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
-		.where("r.date", ">=", isoDateParam(range.dateFirst))
-		.where("r.date", "<=", isoDateParam(range.dateLast))
-		.where((eb) =>
-			eb.not(eb.and([
-				eb("r.adProduct", "=", "Sponsored Brands"),
-				eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
-			]))
-		);
-	if (productAsins) {
-		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
-		// i.e. attacker-writable data — bind every one of them.
-		query = query.where(resolvedAsin, "in", productAsins);
-	}
-	if (filter) {
-		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
-		query = query.where(
-			ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
-			"=",
-			filter.value,
-		);
-	}
+			// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
+			.where("r.date", ">=", isoDateParam(range.dateFirst))
+			.where("r.date", "<=", isoDateParam(range.dateLast))
+			.where((eb) =>
+				eb.not(eb.and([
+					eb("r.adProduct", "=", "Sponsored Brands"),
+					eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+				]))
+			);
+		if (productAsins) {
+			// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
+			// i.e. attacker-writable data — bind every one of them.
+			query = query.where(resolvedAsin, "in", productAsins);
+		}
+		if (filter) {
+			// The filter value is raw caller text (`--filter campaignName:=:<value>`).
+			query = query.where(
+				ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
+				"=",
+				filter.value,
+			);
+		}
 
-	return query.groupBy(dedupeGroupBy(groupByCols)).compile();
+		return (yield* tryOrOperationError(() => query.groupBy(dedupeGroupBy(groupByCols)).compile()));
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,65 +1140,68 @@ function buildQuery2(
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
 ) {
-	// For halo-in, the ASIN is convertedProductId (which product received the halo).
-	// We still need sb_asin_lookup for dimensions that depend on the advertised product.
-	const plan = dimPlan(dims);
-	const productGrain = isProductGrain(dims);
-	const resolvedAsin = resolvedAsinExprProduct01();
-	const dims2 = buildDimExprs(dims, stores, resolvedAsin);
+	return Either.gen(function* () {
+		// For halo-in, the ASIN is convertedProductId (which product received the halo).
+		// We still need sb_asin_lookup for dimensions that depend on the advertised product.
+		const plan = dimPlan(dims);
+		const productGrain = isProductGrain(dims);
+		const resolvedAsin = resolvedAsinExprProduct01();
+		const dims2 = yield* buildDimExprs(dims, stores, resolvedAsin);
+		const currency = yield* currencyCaseExpr(stores);
 
-	const groupByCols: GroupByEntry[] = [];
-	if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
-	if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
-	groupByCols.push(...dims2.groupBy);
+		const groupByCols: GroupByEntry[] = [];
+		if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
+		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
+		groupByCols.push(...dims2.groupBy);
 
-	let query = query2Base(db, stores, queryJoins(plan, filter))
-		.select((eb) => [
-			currencyCaseExpr(stores),
-			...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
-			...dims2.selectExprs,
-			// Halo-in metrics
-			eb.fn.sum<string | null>("r.purchases").as("purchasesHaloIn"),
-			eb.fn.sum<string | null>("r.unitsSold").as("unitsHaloIn"),
-			// The cast stays INSIDE the aggregate; see buildQuery1.
-			eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenueHaloIn"),
-		])
-		.where((eb) =>
-			eb(
-				eb.refTuple("r.merchantId", "r.marketplaceId"),
-				"in",
-				stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+		let query = query2Base(db, stores, queryJoins(plan, filter))
+			.select((eb) => [
+				currency,
+				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
+				...dims2.selectExprs,
+				// Halo-in metrics
+				eb.fn.sum<string | null>("r.purchases").as("purchasesHaloIn"),
+				eb.fn.sum<string | null>("r.unitsSold").as("unitsHaloIn"),
+				// The cast stays INSIDE the aggregate; see buildQuery1.
+				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenueHaloIn"),
+			])
+			.where((eb) =>
+				eb(
+					eb.refTuple("r.merchantId", "r.marketplaceId"),
+					"in",
+					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+				)
 			)
-		)
-		// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
-		.where("r.date", ">=", isoDateParam(range.dateFirst))
-		.where("r.date", "<=", isoDateParam(range.dateLast))
-		.where("r.productRelevance", "=", "Brand halo")
-		// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
-		// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
-		// is populated on both the aggregate and per-ASIN rows, so grain is driven by the
-		// requested dims, not by which column this query keys on).
-		.where((eb) =>
-			eb.not(eb.and([
-				eb("r.adProduct", "=", "Sponsored Brands"),
-				eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
-			]))
-		);
-	if (productAsins) {
-		// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
-		// i.e. attacker-writable data — bind every one of them.
-		query = query.where(resolvedAsin, "in", productAsins);
-	}
-	if (filter) {
-		// The filter value is raw caller text (`--filter campaignName:=:<value>`).
-		query = query.where(
-			ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
-			"=",
-			filter.value,
-		);
-	}
+			// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
+			.where("r.date", ">=", isoDateParam(range.dateFirst))
+			.where("r.date", "<=", isoDateParam(range.dateLast))
+			.where("r.productRelevance", "=", "Brand halo")
+			// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
+			// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
+			// is populated on both the aggregate and per-ASIN rows, so grain is driven by the
+			// requested dims, not by which column this query keys on).
+			.where((eb) =>
+				eb.not(eb.and([
+					eb("r.adProduct", "=", "Sponsored Brands"),
+					eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+				]))
+			);
+		if (productAsins) {
+			// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
+			// i.e. attacker-writable data — bind every one of them.
+			query = query.where(resolvedAsin, "in", productAsins);
+		}
+		if (filter) {
+			// The filter value is raw caller text (`--filter campaignName:=:<value>`).
+			query = query.where(
+				ksql.ref<string>(plan.needsCampaignJoin ? "camp.name" : "camp_filt.name"),
+				"=",
+				filter.value,
+			);
+		}
 
-	return query.groupBy(dedupeGroupBy(groupByCols)).compile();
+		return (yield* tryOrOperationError(() => query.groupBy(dedupeGroupBy(groupByCols)).compile()));
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,108 +1398,111 @@ function round4(n: number): number {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-export async function loadAds(
+export function loadAds(
 	params: LoadAdsParams,
 	sql: postgres.Sql,
-): Promise<LoadAdsResult> {
-	// Validate required fields
-	if (!params.stores) fail("--stores is required");
-	if (!params.when) fail("--when is required");
-	if (!params.groupBy) fail("--groupBy is required");
+): Effect.Effect<LoadAdsResult, Error> {
+	return Effect.gen(function* () {
+		// Validate required fields
+		if (!params.stores) return yield* fail("--stores is required");
+		if (!params.when) return yield* fail("--when is required");
+		if (!params.groupBy) return yield* fail("--groupBy is required");
 
-	// One builder for the whole invocation, built before anything is assembled: it
-	// is where a future `.withSchema(workspaceSchema)` would attach.
-	const db = createCanonicalQueryBuilder();
+		// One builder for the whole invocation, built before anything is assembled: it
+		// is where a future `.withSchema(workspaceSchema)` would attach.
+		const db = createCanonicalQueryBuilder();
 
-	// Resolve stores (merchant <-> marketplace mapping comes from amazon_store)
-	const stores = await resolveStores(params.stores, sql);
+		// Resolve stores (merchant <-> marketplace mapping comes from amazon_store)
+		const stores = yield* resolveStores(params.stores, sql);
 
-	// Validate groupBy
-	const groupByDims = params.groupBy.split(",").map((s) => s.trim()) as GroupByDim[];
-	for (const dim of groupByDims) {
-		if (!VALID_GROUP_BY.includes(dim)) {
-			fail(`Unknown --groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`);
+		// Validate groupBy
+		const groupByDims = params.groupBy.split(",").map((s) => s.trim()) as GroupByDim[];
+		for (const dim of groupByDims) {
+			if (!VALID_GROUP_BY.includes(dim)) {
+				return yield* fail(`Unknown --groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`);
+			}
 		}
-	}
 
-	// Validate timeUnit
-	let timeUnit: TimeUnit | null = null;
-	if (params.timeUnit) {
-		const tu = params.timeUnit.toUpperCase() as TimeUnit;
-		if (!VALID_TIME_UNITS.includes(tu)) {
-			fail(`Unknown --timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`);
+		// Validate timeUnit
+		let timeUnit: TimeUnit | null = null;
+		if (params.timeUnit) {
+			const tu = params.timeUnit.toUpperCase() as TimeUnit;
+			if (!VALID_TIME_UNITS.includes(tu)) {
+				return yield* fail(`Unknown --timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`);
+			}
+			timeUnit = tu;
 		}
-		timeUnit = tu;
-	}
 
-	// Parse filter
-	let filter: FilterExpr | null = null;
-	if (params.filter) {
-		filter = parseFilter(params.filter);
-	}
-
-	const derived = params.derived ?? false;
-	const nested = params.nested ?? false;
-
-	// Resolve --when
-	const range = await resolveWhen(params.when, sql);
-
-	// Resolve --products
-	let productAsins: string[] | null = null;
-	if (params.products) {
-		productAsins = await resolveProducts(params.products, sql);
-		if (productAsins.length === 0) {
-			fail("--products resolved to zero ASINs");
+		// Parse filter
+		let filter: FilterExpr | null = null;
+		if (params.filter) {
+			filter = yield* parseFilter(params.filter);
 		}
-	}
 
-	// Get latest data date for the resolved stores
-	const latestRow = await runCompiled(
-		sql,
-		db
-			.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
-			.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
-			.where((eb) =>
-				eb(
-					eb.refTuple("merchantId", "marketplaceId"),
-					"in",
-					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
-				)
-			)
-			.compile(),
-	);
-	const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
+		const derived = params.derived ?? false;
+		const nested = params.nested ?? false;
 
-	// Build and run both statements. Each compiles its own parameter list, and a
-	// non-empty list also puts them on the extended protocol, where stacked
-	// statements are rejected.
-	const [q1Rows, q2Rows] = await Promise.all([
-		runCompiled(sql, buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
-		runCompiled(sql, buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
-	]);
+		// Resolve --when
+		const range = yield* resolveWhen(params.when, sql);
 
-	// Merge results
-	const data = mergeResults(
-		q1Rows,
-		q2Rows,
-		groupByDims,
-		timeUnit,
-		derived,
-		nested,
-	);
+		// Resolve --products
+		let productAsins: string[] | null = null;
+		if (params.products) {
+			productAsins = yield* resolveProducts(params.products, sql);
+			if (productAsins.length === 0) {
+				return yield* fail("--products resolved to zero ASINs");
+			}
+		}
 
-	return {
-		meta: {
-			dateFirst: range.dateFirst,
-			dateLast: range.dateLast,
-			stores: stores.map((s) => s.countryCode),
-			dateDataLatest,
-			rowCount: data.length,
-			groupBy: groupByDims,
+		// Get latest data date for the resolved stores
+		const latestRow = yield* runCompiled(
+			sql,
+			() =>
+				db
+					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+					.select((eb) => eb.cast<string | null>(eb.fn.max("date"), "text").as("latest"))
+					.where((eb) =>
+						eb(
+							eb.refTuple("merchantId", "marketplaceId"),
+							"in",
+							stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+						)
+					)
+					.compile(),
+		);
+		const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
+
+		// Build and run both statements. Each compiles its own parameter list, and a
+		// non-empty list also puts them on the extended protocol, where stacked
+		// statements are rejected.
+		const [q1Rows, q2Rows] = yield* Effect.all([
+			runCompiled(sql, yield* buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
+			runCompiled(sql, yield* buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
+		], { concurrency: 2 });
+
+		// Merge results
+		const data = mergeResults(
+			q1Rows,
+			q2Rows,
+			groupByDims,
 			timeUnit,
 			derived,
 			nested,
-		},
-		data,
-	};
+		);
+
+		return {
+			meta: {
+				dateFirst: range.dateFirst,
+				dateLast: range.dateLast,
+				stores: stores.map((s) => s.countryCode),
+				dateDataLatest,
+				rowCount: data.length,
+				groupBy: groupByDims,
+				timeUnit,
+				derived,
+				nested,
+			},
+			data,
+		};
+	});
 }

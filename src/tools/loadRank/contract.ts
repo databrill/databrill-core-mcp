@@ -3,6 +3,8 @@
  * dbl-ask-organic-rank toolkit).
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadRank } from "./load.ts";
 import type { LoadRankParams } from "./types.ts";
@@ -25,12 +27,14 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadRankParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		when: String(args["when"] ?? ""),
-		products: typeof args["products"] === "string" ? args["products"] : undefined,
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadRankParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			when: yield* stringArgument(args["when"], "when"),
+			products: typeof args["products"] === "string" ? args["products"] : undefined,
+		};
+	});
 }
 
 export const loadRankTool = {
@@ -40,5 +44,6 @@ export const loadRankTool = {
 		"per-marketplace rank table for each requested country; countries without a rank table are reported in " +
 		"meta.missingRankTables. Reads the client DB (amazon_sales_rank__{cc}, amazon_browse_node).",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadRank(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadRank(params, sql)),
 };

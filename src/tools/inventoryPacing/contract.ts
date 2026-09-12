@@ -2,6 +2,8 @@
  * inventoryPacing — MCP tool contract (the dbl-ask-inventory-pacing decision).
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadInventoryPacing } from "./load.ts";
 import type { LoadInventoryPacingParams } from "./types.ts";
@@ -28,17 +30,19 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadInventoryPacingParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		velocityDays: num(args["velocityDays"]),
-		spendWindowDays: num(args["spendWindowDays"]),
-		criticalDays: num(args["criticalDays"]),
-		lowDays: num(args["lowDays"]),
-		overstockDays: num(args["overstockDays"]),
-		minSpendPerDay: num(args["minSpendPerDay"]),
-		minVelocity: num(args["minVelocity"]),
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadInventoryPacingParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			velocityDays: num(args["velocityDays"]),
+			spendWindowDays: num(args["spendWindowDays"]),
+			criticalDays: num(args["criticalDays"]),
+			lowDays: num(args["lowDays"]),
+			overstockDays: num(args["overstockDays"]),
+			minSpendPerDay: num(args["minSpendPerDay"]),
+			minVelocity: num(args["minVelocity"]),
+		};
+	});
 }
 
 export const inventoryPacingTool = {
@@ -49,5 +53,6 @@ export const inventoryPacingTool = {
 		"Critical runway with active spend → pause; inbound restock softens to throttle; overstock → ramp to sell down. " +
 		"Flags a worst-variant caveat when a child ASIN is critical under a healthy family. Reads the client DB.",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadInventoryPacing(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadInventoryPacing(params, sql)),
 };

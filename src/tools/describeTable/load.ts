@@ -25,6 +25,8 @@
  * feature-origination rule does not apply to this tool family.
  */
 
+import { Effect, Either } from "effect";
+import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import { withReadTransaction } from "../../sqlGuardrails.ts";
@@ -40,39 +42,44 @@ interface DbColumnRow {
 	readonly columnDefault: string | null;
 }
 
-function fail(message: string): never {
-	throw new Error(message);
-}
-
-function parseTable(value: string | undefined): string {
-	const table = value ?? "";
-	if (table === "") {
-		fail("table is required and must be a bare table name");
-	}
-	if (!isSupportedTableName(table)) {
-		fail(
-			`table is not a name this MCP supports; got "${table}". ${SUPPORTED_TABLE_NAME_RULE} ` +
-				"Pass the name exactly as listTables reports it — no schema qualifier, no quoting of your own. " +
-				"This is not a report that the table is missing.",
-		);
-	}
-	return table;
+function parseTable(value: string | undefined): Either.Either<string, Error> {
+	return Either.gen(function* () {
+		const table = value ?? "";
+		if (table === "") {
+			return yield* Either.left(new Error("table is required and must be a bare table name"));
+		}
+		if (!isSupportedTableName(table)) {
+			return yield* Either.left(
+				new Error(
+					`table is not a name this MCP supports; got "${table}". ${SUPPORTED_TABLE_NAME_RULE} ` +
+						"Pass the name exactly as listTables reports it — no schema qualifier, no quoting of your own. " +
+						"This is not a report that the table is missing.",
+				),
+			);
+		}
+		return table;
+	});
 }
 
 export function describeTable(
 	params: DescribeTableParams,
 	sql: Sql,
 	hooks?: McpToolHooks,
-): Promise<DescribeTableResult> {
-	const table = parseTable(params.table);
+): Effect.Effect<DescribeTableResult, Error> {
+	return Effect.gen(function* () {
+		const table = yield* parseTable(params.table);
 
-	return withReadTransaction(sql, hooks, async (tx) => {
-		const schemaRows = await tx<Array<{ readonly schemas: readonly string[] }>>`
+		return (yield* withReadTransaction(sql, hooks, (tx) =>
+			Effect.gen(function* () {
+				const schemaRows = yield* tryPromiseOrOperationError(() =>
+					tx<Array<{ readonly schemas: readonly string[] }>>`
 			SELECT current_schemas(false) AS "schemas"
-		`;
-		const schemas = [...(schemaRows[0]?.schemas ?? [])];
+		`
+				);
+				const schemas = [...(schemaRows[0]?.schemas ?? [])];
 
-		const rows = await tx<DbColumnRow[]>`
+				const rows = yield* tryPromiseOrOperationError(() =>
+					tx<DbColumnRow[]>`
 			WITH "resolved" AS (
 				SELECT "table_schema"
 				FROM "information_schema"."columns"
@@ -93,25 +100,27 @@ export function describeTable(
 			INNER JOIN "resolved" ON "resolved"."table_schema" = "column"."table_schema"
 			WHERE "column"."table_name" = ${table}
 			ORDER BY "column"."ordinal_position" ASC
-		`;
+		`
+				);
 
-		const data: TableColumn[] = rows.map((row) => ({
-			position: Number(row.position),
-			name: row.name,
-			dataType: row.dataType,
-			isNullable: row.isNullable === "YES",
-			columnDefault: row.columnDefault,
-		}));
+				const data: TableColumn[] = rows.map((row) => ({
+					position: Number(row.position),
+					name: row.name,
+					dataType: row.dataType,
+					isNullable: row.isNullable === "YES",
+					columnDefault: row.columnDefault,
+				}));
 
-		return {
-			meta: {
-				table,
-				schema: rows[0]?.schema ?? null,
-				schemas,
-				exists: data.length > 0,
-				columnCount: data.length,
-			},
-			data,
-		};
+				return {
+					meta: {
+						table,
+						schema: rows[0]?.schema ?? null,
+						schemas,
+						exists: data.length > 0,
+						columnCount: data.length,
+					},
+					data,
+				};
+			})));
 	});
 }

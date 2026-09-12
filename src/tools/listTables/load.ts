@@ -26,6 +26,8 @@
  * feature-origination rule does not apply to this tool family.
  */
 
+import { Effect } from "effect";
+import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import { withReadTransaction } from "../../sqlGuardrails.ts";
@@ -38,14 +40,19 @@ interface DbTableRow {
 	readonly type: string;
 }
 
-export function listTables(sql: Sql, hooks?: McpToolHooks): Promise<ListTablesResult> {
-	return withReadTransaction(sql, hooks, async (tx) => {
-		const schemaRows = await tx<Array<{ readonly schemas: readonly string[] }>>`
+export function listTables(sql: Sql, hooks?: McpToolHooks): Effect.Effect<ListTablesResult, Error> {
+	return Effect.gen(function* () {
+		return (yield* withReadTransaction(sql, hooks, (tx) =>
+			Effect.gen(function* () {
+				const schemaRows = yield* tryPromiseOrOperationError(() =>
+					tx<Array<{ readonly schemas: readonly string[] }>>`
 			SELECT current_schemas(false) AS "schemas"
-		`;
-		const schemas = schemaRows[0]?.schemas ?? [];
+		`
+				);
+				const schemas = schemaRows[0]?.schemas ?? [];
 
-		const rows = await tx<DbTableRow[]>`
+				const rows = yield* tryPromiseOrOperationError(() =>
+					tx<DbTableRow[]>`
 			SELECT
 				"table_schema" AS "schema",
 				"table_name" AS "name",
@@ -53,12 +60,14 @@ export function listTables(sql: Sql, hooks?: McpToolHooks): Promise<ListTablesRe
 			FROM "information_schema"."tables"
 			WHERE "table_schema" = ANY(current_schemas(false))
 			ORDER BY "table_schema" ASC, "table_name" ASC
-		`;
+		`
+				);
 
-		const data: ListedTable[] = rows
-			.filter((row) => isSupportedTableName(row.name))
-			.filter((row) => !isHiddenBookkeepingTableName(row.name))
-			.map((row) => ({ schema: row.schema, name: row.name, type: row.type }));
-		return { meta: { schemas: [...schemas], tableCount: data.length }, data };
+				const data: ListedTable[] = rows
+					.filter((row) => isSupportedTableName(row.name))
+					.filter((row) => !isHiddenBookkeepingTableName(row.name))
+					.map((row) => ({ schema: row.schema, name: row.name, type: row.type }));
+				return { meta: { schemas: [...schemas], tableCount: data.length }, data };
+			})));
 	});
 }

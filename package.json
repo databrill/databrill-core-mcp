@@ -1,6 +1,6 @@
 {
 	"name": "@databrill/core-mcp",
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"type": "module",
 	"license": "Apache-2.0",
 	"description": "Databrill client-DB metric loaders + question tools, exposed as MCP tools and a CLI. Runs under bun and deno.",
@@ -23,13 +23,13 @@
 		"@effect/platform-node": "^0.106.0",
 		"@modelcontextprotocol/sdk": "^1.0.0",
 		"dotenv": "^16.4.5",
-		"effect": "3.21.4",
+		"effect": "3.21.2",
 		"kysely": "^0.29.0",
 		"luxon": "^3.5.0",
 		"postgres": "^3.4.8",
 		"temporal-polyfill": "1.0.4",
 		"tinyduration": "^3.3.1",
-		"@jsr/databrill__core-pg-kysely": "^0.1.10"
+		"@jsr/databrill__core-pg-kysely": "^0.1.12"
 	},
 	"devDependencies": {
 		"@types/luxon": "^3.4.2"

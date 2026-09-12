@@ -18,7 +18,7 @@
  *   `42601`. This is the same driver trap `executeSql`'s guardrails close by
  *   forcing `simple: false`.
  *
- * So {@link runCompiled} throws on a zero-parameter compiled query rather than
+ * So {@link runCompiled} fails on a zero-parameter compiled query rather than
  * running it, and {@link boundTrue} is the remedy for the rare query that has no
  * natural value to bind. A loud failure in a test run is the point: the
  * alternative is a silent downgrade nothing else in the package would notice.
@@ -31,24 +31,35 @@
  * readers keep calling it internally, and nothing here opens a connection.
  */
 
+import { Effect } from "effect";
 import { type CanonicalQueryRunner, executeCompiled } from "@jsr/databrill__core-pg-kysely/canonical";
 import { type CompiledQuery, type RawBuilder, sql, type SqlBool } from "kysely";
+import { tryOrOperationError } from "./effectErrors.ts";
 
 /**
- * Execute `compiled` on `runner`, refusing a query that binds nothing.
+ * Execute a compiled query or compilation function on `runner`, refusing a query that binds nothing.
+ * A compilation function runs when the Effect executes; thrown errors become typed failures.
  *
  * `runner` is the injected postgres.js `Sql`, which satisfies
  * `CanonicalQueryRunner` structurally — pass it straight in.
  */
-export async function runCompiled<O>(runner: CanonicalQueryRunner, compiled: CompiledQuery<O>): Promise<O[]> {
-	if (compiled.parameters.length === 0) {
-		throw new Error(
-			`Refusing to run a compiled query with no bind parameters: postgres.js selects the SIMPLE protocol ` +
-				`when the parameter list is empty, and stacked statements execute there. Bind at least one ` +
-				`value, or add boundTrue(). SQL: ${compiled.sql}`,
-		);
-	}
-	return await executeCompiled(runner, compiled);
+export function runCompiled<O>(
+	runner: CanonicalQueryRunner,
+	query: CompiledQuery<O> | (() => CompiledQuery<O>),
+): Effect.Effect<O[], Error> {
+	return Effect.gen(function* () {
+		const compiled = typeof query === "function" ? yield* tryOrOperationError(query) : query;
+		if (compiled.parameters.length === 0) {
+			return yield* Effect.fail(
+				new Error(
+					`Refusing to run a compiled query with no bind parameters: postgres.js selects the SIMPLE protocol ` +
+						`when the parameter list is empty, and stacked statements execute there. Bind at least one ` +
+						`value, or add boundTrue(). SQL: ${compiled.sql}`,
+				),
+			);
+		}
+		return yield* executeCompiled(runner, compiled);
+	});
 }
 
 /** A bound `true` predicate, for a query with no natural value to bind. Compiles to `$n`. */

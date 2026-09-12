@@ -6,13 +6,14 @@
  * it back.
  */
 
+import type { Effect } from "effect";
 import type { TransactionSql } from "postgres";
 
 export interface McpToolHooks {
 	/**
 	 * Run as the FIRST statement inside the tool's own transaction, to confirm the
 	 * connection is the one the caller was routed to before the caller's statement
-	 * runs on it. It throws to abort the call.
+	 * runs on it. Its Effect fails to abort the call.
 	 *
 	 * It exists because the transaction is opened HERE but only the binding frontend
 	 * knows what identity to expect; mcp-local must not learn the hosted `w{wsid}`
@@ -24,5 +25,5 @@ export interface McpToolHooks {
 	 * would prove nothing under transaction pooling — and postgres.js's
 	 * `TransactionSql` is not assignable to `Sql`.
 	 */
-	readonly assertIdentity?: (sql: TransactionSql) => Promise<void>;
+	readonly assertIdentity?: (sql: TransactionSql) => Effect.Effect<void, Error>;
 }

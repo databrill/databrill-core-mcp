@@ -2,7 +2,7 @@
 
 Client-DB metric loaders and question tools for Databrill clients, exposed as
 **MCP tools** and a **CLI**. Library-first: the tool logic is authored once as
-`(params, sql) => result`; thin frontends supply the connection.
+`(params, sql) => Effect<Result, Error>`; frontends supply the connection.
 
 Runs under **bun** and **deno** (same files, one `package.json`/`node_modules`).
 
@@ -12,7 +12,7 @@ Runs under **bun** and **deno** (same files, one `package.json`/`node_modules`).
 src/
   contract.ts              # tool registry (the contract — single source of truth)
   registerTools.ts         # registerTools(server, getSql) — mounts tools on an MCP Server
-  db.ts                    # registry-selected pools + role-binding assertion
+  db.ts                    # registry-selected pools + explicit cleanup
   clientData.ts            # client-DB data layer (portable descendant of digest _shared)
   config.ts                # workspace registry (DATABRILL_CONFIG) + explicit routing
   amazonConstants.ts       # marketplace facts (mirrored from the monorepo's canonical module)
@@ -53,6 +53,44 @@ MCP client config (Desktop / dev):
 ```json
 { "mcpServers": { "databrill-core": { "command": "bun", "args": ["run", "bin/stdio.ts"] } } }
 ```
+
+## Library execution
+
+SDK registration, string argument validation, SQL client construction, date parsing,
+advertising SQL compilation, report validation, JSON serialization and diagnosis
+rendering return `Either<Value, Error>` and execute when called.
+Read their `Left`/`Right` result directly. Infallible helpers and query-builder
+construction return ordinary values.
+
+Advertising, report, sales-diagnosis, inventory-pacing and TFL inventory loaders,
+the `McpTool.run` contract, transaction programs, hooks, provider acquisition and
+teardown, and application lifecycles use
+lazy Effect programs. Use `yield*` to compose
+both Either and Effect inside an Effect, and run the runtime only at an
+application boundary. Constructing a database program does not query or acquire
+a pool.
+
+`registerTools` returns `Either<void, Error>` after registering the SDK handlers.
+It accepts connection resolvers returning `Effect<Sql, Error>` or
+`Either<Sql, Error>`; hosted lookups are synchronous while a local provider may
+wait for concurrent teardown. Optional `getHooks` callbacks return plain
+`McpToolHooks`, and each asynchronous `assertIdentity` hook returns
+`Effect<void, Error>`. SDK request handlers execute async dispatch with the
+request's cancellation signal. The synchronous list handler returns its concrete
+protocol result directly.
+
+`createSqlProvider(config)` constructs an empty provider. Repeated and concurrent
+`getSqlForArgs` executions share each workspace's acquired pool. Execute
+`endAll()` when the owner finishes; it attempts every pool and retains failed
+handles for a later retry. `acquireSqlProvider(config)` registers pool cleanup with the owning Effect scope.
+The CLI and stdio programs finish with `Effect.scoped`; stdio acquires its server in the same
+scope, so server shutdown precedes pool teardown. Cleanup failures become defects and remain
+in the Cause alongside work failures and interruption.
+
+Effect is a public dependency pinned to 3.21.2. Consumers composing local package
+source must resolve the same Effect version: different versions have incompatible
+private iterator types. The database driver's own query objects and transaction
+callbacks retain their native contracts; owned tool programs remain Effects.
 
 ## Workspace registry
 

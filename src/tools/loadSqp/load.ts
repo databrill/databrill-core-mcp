@@ -35,6 +35,7 @@
  * the table — fix the data, do not switch to `AVG`, which would hide it.
  */
 
+import { Effect, Either } from "effect";
 import type postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
@@ -50,8 +51,8 @@ import {
 	VALID_SQP_TIME_UNITS,
 } from "./types.ts";
 
-function fail(msg: string): never {
-	throw new Error(msg);
+function fail(msg: string): Either.Either<never, Error> {
+	return Either.left(new Error(msg));
 }
 
 function round3(n: number): number {
@@ -62,157 +63,163 @@ function share(part: number, whole: number): number {
 	return whole > 0 ? round3((part / whole) * 100) : 0;
 }
 
-export async function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Promise<LoadSqpResult> {
-	if (!params.stores) fail("stores is required");
-	if (!params.when) fail("when is required");
+export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect<LoadSqpResult, Error> {
+	return Effect.gen(function* () {
+		if (!params.stores) return yield* fail("stores is required");
+		if (!params.when) return yield* fail("when is required");
 
-	const timeUnit = (params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK") as SqpTimeUnit;
-	if (!VALID_SQP_TIME_UNITS.includes(timeUnit)) {
-		fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_SQP_TIME_UNITS.join(", ")}`);
-	}
-	const keywordLimit = params.keywordLimit ?? 25;
+		const timeUnit = (params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK") as SqpTimeUnit;
+		if (!VALID_SQP_TIME_UNITS.includes(timeUnit)) {
+			return yield* fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_SQP_TIME_UNITS.join(", ")}`);
+		}
+		const keywordLimit = params.keywordLimit ?? 25;
 
-	const stores = await resolveStores(params.stores, sql);
-	const marketplaceIds = [...new Set(stores.map((s) => s.marketplaceId))];
-	const range = await resolveWhen(params.when, sql);
+		const stores = yield* resolveStores(params.stores, sql);
+		const marketplaceIds = [...new Set(stores.map((s) => s.marketplaceId))];
+		const range = yield* resolveWhen(params.when, sql);
 
-	let asins: string[] | null = null;
-	if (params.products) {
-		asins = await resolveProducts(params.products, sql);
-		if (asins.length === 0) fail("products resolved to zero ASINs");
-	}
-	// One builder for the whole invocation, built before the CTE: it is where a
-	// future `.withSchema(workspaceSchema)` would attach.
-	const db = createCanonicalQueryBuilder();
+		let asins: string[] | null = null;
+		if (params.products) {
+			asins = yield* resolveProducts(params.products, sql);
+			if (asins.length === 0) return yield* fail("products resolved to zero ASINs");
+		}
+		// One builder for the whole invocation, built before the CTE: it is where a
+		// future `.withSchema(workspaceSchema)` would attach.
+		const db = createCanonicalQueryBuilder();
 
-	// The market-grain CTE, shared by both statements below. The two original
-	// templates spelled its GROUP BY in a different column ORDER, which does not
-	// affect the result, so one builder serves both; each statement compiles its
-	// own copy of the CTE text with its own placeholder numbering.
-	let perQuery = db
-		.selectFrom("amzreport_SEARCH_QUERY_PERFORMANCE")
-		.select((eb) => [
-			"marketplaceId",
-			"dateFirst",
-			"searchQuery",
-			eb.fn.sum<string | null>(jsonbInt(eb.ref("impressionData"), "asinImpressionCount")).as("our_impr"),
-			eb.fn.sum<string | null>(jsonbInt(eb.ref("clickData"), "asinClickCount")).as("our_clicks"),
-			eb.fn.sum<string | null>(jsonbInt(eb.ref("purchaseData"), "asinPurchaseCount")).as("our_purch"),
-			// MAX, not SUM: the total* columns are whole-market figures that the
-			// report repeats identically on every ASIN row of a (searchQuery,
-			// marketplaceId, dateFirst) group. MAX reads that single value; SUM
-			// would multiply it by the number of our ASINs that happen to rank for
-			// the term.
-			eb.fn.max<number | null>(jsonbInt(eb.ref("impressionData"), "totalQueryImpressionCount")).as("market_impr"),
-			eb.fn.max<number | null>(jsonbInt(eb.ref("clickData"), "totalClickCount")).as("market_clicks"),
-			eb.fn.max<number | null>(jsonbInt(eb.ref("purchaseData"), "totalPurchaseCount")).as("market_purch"),
-		])
-		.where("timeUnit", "=", timeUnit)
-		.where("marketplaceId", "in", marketplaceIds)
-		.where("dateFirst", ">=", isoDateParam(range.dateFirst))
-		.where("dateFirst", "<=", isoDateParam(range.dateLast))
-		.groupBy(["marketplaceId", "dateFirst", "searchQuery"]);
-	// The products filter stays INSIDE the CTE — see the module doc.
-	if (asins !== null) {
-		perQuery = perQuery.where("asin", "in", asins);
-	}
-
-	const periodRows = await runCompiled(
-		sql,
-		db
-			.with("per_query", () => perQuery)
-			.selectFrom("per_query")
+		// The market-grain CTE, shared by both statements below. The two original
+		// templates spelled its GROUP BY in a different column ORDER, which does not
+		// affect the result, so one builder serves both; each statement compiles its
+		// own copy of the CTE text with its own placeholder numbering.
+		let perQuery = db
+			.selectFrom("amzreport_SEARCH_QUERY_PERFORMANCE")
 			.select((eb) => [
 				"marketplaceId",
-				eb.cast<string>(eb.ref("dateFirst"), "text").as("period"),
-				eb.fn.sum<string | null>("our_impr").as("our_impr"),
-				eb.fn.sum<string | null>("market_impr").as("market_impr"),
-				eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
-				eb.fn.sum<string | null>("market_clicks").as("market_clicks"),
-				eb.fn.sum<string | null>("our_purch").as("our_purch"),
-				eb.fn.sum<string | null>("market_purch").as("market_purch"),
+				"dateFirst",
+				"searchQuery",
+				eb.fn.sum<string | null>(jsonbInt(eb.ref("impressionData"), "asinImpressionCount")).as("our_impr"),
+				eb.fn.sum<string | null>(jsonbInt(eb.ref("clickData"), "asinClickCount")).as("our_clicks"),
+				eb.fn.sum<string | null>(jsonbInt(eb.ref("purchaseData"), "asinPurchaseCount")).as("our_purch"),
+				// MAX, not SUM: the total* columns are whole-market figures that the
+				// report repeats identically on every ASIN row of a (searchQuery,
+				// marketplaceId, dateFirst) group. MAX reads that single value; SUM
+				// would multiply it by the number of our ASINs that happen to rank for
+				// the term.
+				eb.fn.max<number | null>(jsonbInt(eb.ref("impressionData"), "totalQueryImpressionCount")).as(
+					"market_impr",
+				),
+				eb.fn.max<number | null>(jsonbInt(eb.ref("clickData"), "totalClickCount")).as("market_clicks"),
+				eb.fn.max<number | null>(jsonbInt(eb.ref("purchaseData"), "totalPurchaseCount")).as("market_purch"),
 			])
-			.groupBy(["marketplaceId", "dateFirst"])
-			.orderBy("dateFirst")
-			.orderBy("marketplaceId")
-			.compile(),
-	);
+			.where("timeUnit", "=", timeUnit)
+			.where("marketplaceId", "in", marketplaceIds)
+			.where("dateFirst", ">=", isoDateParam(range.dateFirst))
+			.where("dateFirst", "<=", isoDateParam(range.dateLast))
+			.groupBy(["marketplaceId", "dateFirst", "searchQuery"]);
+		// The products filter stays INSIDE the CTE — see the module doc.
+		if (asins !== null) {
+			perQuery = perQuery.where("asin", "in", asins);
+		}
 
-	const periods: SqpPeriodRow[] = periodRows.map((r) => {
-		const marketplaceId = String(r.marketplaceId);
-		const ourImpr = Number(r.our_impr ?? 0);
-		const marketImpr = Number(r.market_impr ?? 0);
-		const ourClicks = Number(r.our_clicks ?? 0);
-		const marketClicks = Number(r.market_clicks ?? 0);
-		const ourPurchases = Number(r.our_purch ?? 0);
-		const marketPurchases = Number(r.market_purch ?? 0);
+		const periodRows = yield* runCompiled(
+			sql,
+			() =>
+				db
+					.with("per_query", () => perQuery)
+					.selectFrom("per_query")
+					.select((eb) => [
+						"marketplaceId",
+						eb.cast<string>(eb.ref("dateFirst"), "text").as("period"),
+						eb.fn.sum<string | null>("our_impr").as("our_impr"),
+						eb.fn.sum<string | null>("market_impr").as("market_impr"),
+						eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
+						eb.fn.sum<string | null>("market_clicks").as("market_clicks"),
+						eb.fn.sum<string | null>("our_purch").as("our_purch"),
+						eb.fn.sum<string | null>("market_purch").as("market_purch"),
+					])
+					.groupBy(["marketplaceId", "dateFirst"])
+					.orderBy("dateFirst")
+					.orderBy("marketplaceId")
+					.compile(),
+		);
+
+		const periods: SqpPeriodRow[] = periodRows.map((r) => {
+			const marketplaceId = String(r.marketplaceId);
+			const ourImpr = Number(r.our_impr ?? 0);
+			const marketImpr = Number(r.market_impr ?? 0);
+			const ourClicks = Number(r.our_clicks ?? 0);
+			const marketClicks = Number(r.market_clicks ?? 0);
+			const ourPurchases = Number(r.our_purch ?? 0);
+			const marketPurchases = Number(r.market_purch ?? 0);
+			return {
+				country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
+				marketplaceId,
+				period: String(r.period),
+				ourImpr,
+				marketImpr,
+				ourClicks,
+				marketClicks,
+				ourPurchases,
+				marketPurchases,
+				imprShare: share(ourImpr, marketImpr),
+				clickShare: share(ourClicks, marketClicks),
+				purchShare: share(ourPurchases, marketPurchases),
+			};
+		});
+
+		const keywordRows = yield* runCompiled(
+			sql,
+			() =>
+				db
+					.with("per_query", () => perQuery)
+					.selectFrom("per_query")
+					.select((eb) => [
+						eb.ref("searchQuery").as("q"),
+						eb.fn.sum<string | null>("market_impr").as("mkt_impr"),
+						eb.fn.sum<string | null>("our_impr").as("our_impr"),
+						eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
+						eb.fn.sum<string | null>("market_clicks").as("mkt_clicks"),
+						eb.fn.sum<string | null>("our_purch").as("our_purch"),
+						eb.fn.sum<string | null>("market_purch").as("mkt_purch"),
+					])
+					.groupBy("searchQuery")
+					.orderBy("mkt_impr", (ob) => ob.desc().nullsLast())
+					.limit(keywordLimit)
+					.compile(),
+		);
+
+		const keywords: SqpKeywordRow[] = keywordRows.map((r) => {
+			const mktImpr = Number(r.mkt_impr ?? 0);
+			const ourImpr = Number(r.our_impr ?? 0);
+			const mktClicks = Number(r.mkt_clicks ?? 0);
+			const ourClicks = Number(r.our_clicks ?? 0);
+			const mktPurch = Number(r.mkt_purch ?? 0);
+			const ourPurch = Number(r.our_purch ?? 0);
+			return {
+				q: String(r.q ?? ""),
+				mktImpr,
+				ourImpr,
+				imprShare: share(ourImpr, mktImpr),
+				mktClicks,
+				ourClicks,
+				clickShare: share(ourClicks, mktClicks),
+				mktPurch,
+				ourPurch,
+				purchShare: share(ourPurch, mktPurch),
+			};
+		});
+
 		return {
-			country: marketplaceIdToMarketplaceInfo[marketplaceId]?.countryCode ?? marketplaceId,
-			marketplaceId,
-			period: String(r.period),
-			ourImpr,
-			marketImpr,
-			ourClicks,
-			marketClicks,
-			ourPurchases,
-			marketPurchases,
-			imprShare: share(ourImpr, marketImpr),
-			clickShare: share(ourClicks, marketClicks),
-			purchShare: share(ourPurchases, marketPurchases),
+			meta: {
+				dateFirst: range.dateFirst,
+				dateLast: range.dateLast,
+				stores: [...new Set(stores.map((s) => s.countryCode))],
+				timeUnit,
+				periodCount: periods.length,
+				keywordCount: keywords.length,
+			},
+			periods,
+			keywords,
 		};
 	});
-
-	const keywordRows = await runCompiled(
-		sql,
-		db
-			.with("per_query", () => perQuery)
-			.selectFrom("per_query")
-			.select((eb) => [
-				eb.ref("searchQuery").as("q"),
-				eb.fn.sum<string | null>("market_impr").as("mkt_impr"),
-				eb.fn.sum<string | null>("our_impr").as("our_impr"),
-				eb.fn.sum<string | null>("our_clicks").as("our_clicks"),
-				eb.fn.sum<string | null>("market_clicks").as("mkt_clicks"),
-				eb.fn.sum<string | null>("our_purch").as("our_purch"),
-				eb.fn.sum<string | null>("market_purch").as("mkt_purch"),
-			])
-			.groupBy("searchQuery")
-			.orderBy("mkt_impr", (ob) => ob.desc().nullsLast())
-			.limit(keywordLimit)
-			.compile(),
-	);
-
-	const keywords: SqpKeywordRow[] = keywordRows.map((r) => {
-		const mktImpr = Number(r.mkt_impr ?? 0);
-		const ourImpr = Number(r.our_impr ?? 0);
-		const mktClicks = Number(r.mkt_clicks ?? 0);
-		const ourClicks = Number(r.our_clicks ?? 0);
-		const mktPurch = Number(r.mkt_purch ?? 0);
-		const ourPurch = Number(r.our_purch ?? 0);
-		return {
-			q: String(r.q ?? ""),
-			mktImpr,
-			ourImpr,
-			imprShare: share(ourImpr, mktImpr),
-			mktClicks,
-			ourClicks,
-			clickShare: share(ourClicks, mktClicks),
-			mktPurch,
-			ourPurch,
-			purchShare: share(ourPurch, mktPurch),
-		};
-	});
-
-	return {
-		meta: {
-			dateFirst: range.dateFirst,
-			dateLast: range.dateLast,
-			stores: [...new Set(stores.map((s) => s.countryCode))],
-			timeUnit,
-			periodCount: periods.length,
-			keywordCount: keywords.length,
-		},
-		periods,
-		keywords,
-	};
 }

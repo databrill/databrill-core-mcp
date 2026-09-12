@@ -2,6 +2,8 @@
  * loadEconomics — MCP tool contract (profitability / dbl-ask-profitability).
  */
 
+import { stringArgument } from "../../toolParams.ts";
+import { Effect, Either } from "effect";
 import type { Sql } from "postgres";
 import { loadEconomics, type LoadEconomicsParams } from "./load.ts";
 import type { EconomicsInput } from "./economics.ts";
@@ -30,15 +32,17 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): LoadEconomicsParams {
-	return {
-		stores: String(args["stores"] ?? ""),
-		when: String(args["when"] ?? ""),
-		products: typeof args["products"] === "string" ? args["products"] : undefined,
-		economics: (args["economics"] && typeof args["economics"] === "object")
-			? args["economics"] as EconomicsInput
-			: null,
-	};
+function parseParams(args: Record<string, unknown>): Either.Either<LoadEconomicsParams, Error> {
+	return Either.gen(function* () {
+		return {
+			stores: yield* stringArgument(args["stores"], "stores"),
+			when: yield* stringArgument(args["when"], "when"),
+			products: typeof args["products"] === "string" ? args["products"] : undefined,
+			economics: (args["economics"] && typeof args["economics"] === "object")
+				? args["economics"] as EconomicsInput
+				: null,
+		};
+	});
 }
 
 export const loadEconomicsTool = {
@@ -48,5 +52,6 @@ export const loadEconomicsTool = {
 		"are supplied) net margin and net profit per ad sale with/without halo. Fetches the ad rollup from the client DB; " +
 		"COGS/price/fees must be passed in `economics` since they are not stored in the DB.",
 	inputSchema,
-	run: (args: Record<string, unknown>, sql: Sql) => loadEconomics(parseParams(args), sql),
+	run: (args: Record<string, unknown>, sql: Sql) =>
+		Effect.flatMap(parseParams(args), (params) => loadEconomics(params, sql)),
 };

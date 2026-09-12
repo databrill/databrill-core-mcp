@@ -3,6 +3,7 @@
  * means adding it here; `registerTools`, the CLI, and the hosted app pick it up.
  */
 
+import type { Effect } from "effect";
 import type { Sql } from "postgres";
 import { describeTableTool } from "./tools/describeTable/contract.ts";
 import { executeSqlTool } from "./tools/executeSql/contract.ts";
@@ -26,7 +27,7 @@ export interface McpTool {
 	 * `hooks` is optional and most tools ignore it; a tool that opens a transaction
 	 * runs `hooks.assertIdentity` as that transaction's first statement.
 	 */
-	readonly run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => Promise<unknown>;
+	readonly run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => Effect.Effect<unknown, Error>;
 	/** Optional workspace feature flag required before this tool is listed or callable. */
 	readonly feature?: string;
 	/** Which kind of connection this tool must be handed. Absent means `"read"`. */

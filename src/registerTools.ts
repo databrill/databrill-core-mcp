@@ -18,10 +18,13 @@
  * no routing directory to expose `listWorkspaces` without a `wsid` tool argument.
  */
 
+import { Effect, Either } from "effect";
+import { exitValue, tryOrOperationError } from "./effectErrors.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
 	type CallToolRequest,
 	CallToolRequestSchema,
+	type CallToolResult,
 	ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Sql } from "postgres";
@@ -96,7 +99,10 @@ function withWsid(
 	inputSchema: Record<string, unknown>,
 	wsids: string[],
 ): Record<string, unknown> {
-	const properties = { ...(inputSchema["properties"] as Record<string, unknown> | undefined) };
+	const rawProperties = inputSchema["properties"];
+	const properties: Record<string, unknown> = typeof rawProperties === "object" && rawProperties !== null
+		? Object.fromEntries(Object.entries(rawProperties))
+		: {};
 	properties["wsid"] = {
 		type: "string",
 		enum: wsids,
@@ -145,60 +151,85 @@ function isAllowedForCall(
 	if (tool.feature === undefined || config === null || config === undefined) {
 		return true;
 	}
-	try {
-		return workspaceHasFeature(resolveWorkspace(config, args), tool.feature);
-	} catch {
-		// Let the connection resolver produce its actionable explicit-selection
-		// error. The tool is visible because at least one workspace supports it.
-		return true;
-	}
+	const feature = tool.feature;
+	return Either.match(resolveWorkspace(config, args), {
+		onRight: (workspace) => workspaceHasFeature(workspace, feature),
+		// Let the connection resolver report invalid explicit workspace selection.
+		onLeft: () => true,
+	});
 }
 
 export function registerTools(
 	server: Server,
-	getSql: (args: Record<string, unknown>, access: McpToolAccess) => Sql | Promise<Sql>,
+	getSql: (
+		args: Record<string, unknown>,
+		access: McpToolAccess,
+	) => Effect.Effect<Sql, Error> | Either.Either<Sql, Error>,
 	config?: WorkspaceDirectory | null,
 	options: RegisterToolsOptions = {},
-): void {
-	const discoveryDirectory = config ?? options.discoveryDirectory;
-	server.setRequestHandler(ListToolsRequestSchema, () => {
-		const listed = tools.filter((tool) => isVisible(tool, config, options)).map((tool) => ({
-			name: tool.name,
-			description: tool.description,
-			inputSchema: config ? withWsid(tool.inputSchema, eligibleWsids(tool, config)) : tool.inputSchema,
-		}));
-		if (discoveryDirectory) {
-			listed.unshift({
-				name: LIST_WORKSPACES,
-				description:
-					"List the configured client workspaces (wsid, label, merchants and the countries each sells in). " +
-					(config
-						? "Use it to pick the explicit `wsid` required by every data tool."
-						: "The connector URL fixes the active workspace; data tools need no `wsid` argument."),
-				inputSchema: { type: "object", properties: {}, additionalProperties: false },
+): Either.Either<void, Error> {
+	return tryOrOperationError(() => {
+		const discoveryDirectory = config ?? options.discoveryDirectory;
+		server.setRequestHandler(ListToolsRequestSchema, () =>
+			Either.getOrThrowWith(
+				tryOrOperationError(() => {
+					const listed = tools.filter((tool) => isVisible(tool, config, options)).map((tool) => ({
+						name: tool.name,
+						description: tool.description,
+						inputSchema: config
+							? withWsid(tool.inputSchema, eligibleWsids(tool, config))
+							: tool.inputSchema,
+					}));
+					if (discoveryDirectory) {
+						listed.unshift({
+							name: LIST_WORKSPACES,
+							description:
+								"List the configured client workspaces (wsid, label, merchants and the countries each sells in). " +
+								(config
+									? "Use it to pick the explicit `wsid` required by every data tool."
+									: "The connector URL fixes the active workspace; data tools need no `wsid` argument."),
+							inputSchema: { type: "object", properties: {}, additionalProperties: false },
+						});
+					}
+					return { tools: listed };
+				}),
+				(error) => error,
+			));
+
+		server.setRequestHandler(
+			CallToolRequestSchema,
+			(req: CallToolRequest, extra: { readonly signal: AbortSignal }) =>
+				Effect.runPromiseExit(dispatch(req), { signal: extra.signal }).then(exitValue),
+		);
+
+		function dispatch(req: CallToolRequest): Effect.Effect<CallToolResult, Error> {
+			return Effect.gen(function* () {
+				const args = req.params.arguments ?? {};
+
+				if (discoveryDirectory && req.params.name === LIST_WORKSPACES) {
+					const text = yield* encodeToolResult(summarizeConfig(discoveryDirectory));
+					return { content: [{ type: "text", text }] };
+				}
+
+				const tool = tools.find((t) => t.name === req.params.name);
+				if (tool === undefined || !isAllowedForCall(tool, args, config, options)) {
+					return yield* Effect.fail(new Error(`Unknown tool: ${req.params.name}`));
+				}
+				return yield* Effect.gen(function* () {
+					const access = tool.access ?? "read";
+					const resolve = yield* tryOrOperationError(() => getSql(args, access));
+					const sql = yield* resolve;
+					const hooks = yield* tryOrOperationError(() => options.getHooks?.(args, access));
+					const result = yield* tool.run(args, sql, hooks);
+					const text = yield* encodeToolResult(result);
+					return { content: [{ type: "text" as const, text }] };
+				}).pipe(Effect.catchAll((err) =>
+					Effect.succeed({
+						content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+						isError: true,
+					})
+				));
 			});
-		}
-		return { tools: listed };
-	});
-
-	server.setRequestHandler(CallToolRequestSchema, async (req: CallToolRequest) => {
-		const args = (req.params.arguments ?? {}) as Record<string, unknown>;
-
-		if (discoveryDirectory && req.params.name === LIST_WORKSPACES) {
-			return { content: [{ type: "text", text: encodeToolResult(summarizeConfig(discoveryDirectory)) }] };
-		}
-
-		const tool = tools.find((t) => t.name === req.params.name);
-		if (!tool || !isAllowedForCall(tool, args, config, options)) {
-			throw new Error(`Unknown tool: ${req.params.name}`);
-		}
-		try {
-			const access = tool.access ?? "read";
-			const result = await tool.run(args, await getSql(args, access), options.getHooks?.(args, access));
-			return { content: [{ type: "text", text: encodeToolResult(result) }] };
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
 		}
 	});
 }

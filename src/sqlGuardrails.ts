@@ -20,6 +20,9 @@
  * a plain `await sql.unsafe(text)` would silently reopen the trap.
  */
 
+import { Effect, Either } from "effect";
+import { tryOrOperationError, tryPromiseOrOperationError } from "./effectErrors.ts";
+import { runPostgresJsTransaction } from "./runPostgresJsTransaction.ts";
 import type { Sql, TransactionSql } from "postgres";
 import type { McpToolHooks } from "./toolHooks.ts";
 
@@ -124,8 +127,12 @@ interface WriteExecution {
 }
 
 interface RowAccumulator {
-	/** Add one cursor chunk. Returns `false` once a cap trips and reading must stop. */
-	readonly add: (chunk: readonly SqlRow[]) => boolean;
+	/**
+	 * Measure and retain rows from a cursor chunk. Fails if a row cannot be JSON-encoded.
+	 * A reached cap returns Right(false), not an error. Write callers must still drain
+	 * the cursor so the complete statement executes.
+	 */
+	readonly add: (chunk: readonly SqlRow[]) => Either.Either<boolean, Error>;
 	readonly rows: () => readonly SqlRow[];
 	readonly truncatedBy: () => TruncationCap | null;
 }
@@ -160,8 +167,8 @@ export function isToolHookError(err: unknown): err is ToolHookError {
 	return err instanceof Error && fieldOf(err, "_tag") === TOOL_HOOK_ERROR_TAG;
 }
 
-function fail(message: string): never {
-	throw new Error(message);
+function fail(message: string): Either.Either<never, Error> {
+	return Either.left(new Error(message));
 }
 
 /** Read one property off a value of unknown shape without a type assertion. */
@@ -188,13 +195,13 @@ const encoder = new TextEncoder();
  * every response, whose reader is a language model; `bin/cli.ts` still prints
  * tab-indented JSON for the human case.
  */
-export function encodeToolResult(result: unknown): string {
-	return JSON.stringify(result);
+export function encodeToolResult(result: unknown): Either.Either<string, Error> {
+	return tryOrOperationError(() => JSON.stringify(result));
 }
 
 /** UTF-8 byte length of the text `encodeToolResult` produces. */
-export function encodedByteLength(result: unknown): number {
-	return encoder.encode(encodeToolResult(result)).length;
+export function encodedByteLength(result: unknown): Either.Either<number, Error> {
+	return Either.map(encodeToolResult(result), (text) => encoder.encode(text).length);
 }
 
 /**
@@ -202,7 +209,7 @@ export function encodedByteLength(result: unknown): number {
  * the number `createRowAccumulator` sums, and it is `encodeToolResult` applied to
  * the row rather than a second stringify that could drift from it.
  */
-export function serializedByteLength(row: SqlRow): number {
+export function serializedByteLength(row: SqlRow): Either.Either<number, Error> {
 	return encodedByteLength(row);
 }
 
@@ -221,7 +228,7 @@ export function serializedByteLength(row: SqlRow): number {
  * `rowsAffected` and `returnedRowCount` rather than `executeSql`'s fields, and it
  * has to compute its own reserve from this function rather than a second rule.
  */
-export function envelopeByteLength(meta: object): number {
+export function envelopeByteLength(meta: object): Either.Either<number, Error> {
 	return encodedByteLength({ meta, data: [] });
 }
 
@@ -230,32 +237,40 @@ export function envelopeByteLength(meta: object): number {
  * with a message naming the maximum rather than silently clamped, so an agent
  * learns the ceiling instead of receiving less than it asked for with no warning.
  */
-export function parseRowLimit(value: number | undefined): number {
-	if (value === undefined) {
-		return DEFAULT_ROW_LIMIT;
-	}
-	if (!Number.isInteger(value) || value < 1) {
-		fail(`limit must be a whole number of at least 1 (maximum ${MAX_ROW_LIMIT})`);
-	}
-	if (value > MAX_ROW_LIMIT) {
-		fail(`limit ${value} exceeds the maximum of ${MAX_ROW_LIMIT} rows; request ${MAX_ROW_LIMIT} or fewer`);
-	}
-	return value;
+export function parseRowLimit(value: number | undefined): Either.Either<number, Error> {
+	return Either.gen(function* () {
+		if (value === undefined) {
+			return DEFAULT_ROW_LIMIT;
+		}
+		if (!Number.isInteger(value) || value < 1) {
+			return yield* fail(`limit must be a whole number of at least 1 (maximum ${MAX_ROW_LIMIT})`);
+		}
+		if (value > MAX_ROW_LIMIT) {
+			return yield* fail(
+				`limit ${value} exceeds the maximum of ${MAX_ROW_LIMIT} rows; request ${MAX_ROW_LIMIT} or fewer`,
+			);
+		}
+		return value;
+	});
 }
 
-/** Validate the caller's statement is present and non-blank. Its CONTENT is never inspected. */
-export function parseStatement(value: string | undefined): string {
-	const statement = value?.trim() ?? "";
-	if (statement === "") {
-		fail("sql is required and must be a non-empty SQL statement");
-	}
-	return statement;
+/** Trim surrounding whitespace and reject a missing or blank statement. Does not parse SQL. */
+export function trimStatement(value: string | undefined): Either.Either<string, Error> {
+	return Either.gen(function* () {
+		const statement = value?.trim() ?? "";
+		if (statement === "") {
+			return yield* fail("sql is required and must be a non-empty SQL statement");
+		}
+		return statement;
+	});
 }
 
 /**
  * Accumulate rows until a cap trips. Both caps are checked BEFORE a row is kept,
  * and the row cap only trips on a row BEYOND the limit — so a query returning
  * exactly `rowLimit` rows reports itself complete rather than falsely truncated.
+ * Once truncated, every later add returns false without retaining or encoding rows,
+ * so callers that continue draining keep an initial ordered subset of the result.
  *
  * `bytes` starts at the envelope reserve and adds the comma that precedes every
  * row after the first, so it is not a proxy for the payload — it IS the encoded
@@ -270,20 +285,25 @@ export function createRowAccumulator(budget: RowBudget): RowAccumulator {
 
 	return {
 		add(chunk) {
-			for (const row of chunk) {
-				if (rows.length >= budget.rowLimit) {
-					truncatedBy = "rows";
+			return Either.gen(function* () {
+				if (truncatedBy !== null) {
 					return false;
 				}
-				const rowBytes = serializedByteLength(row) + (rows.length === 0 ? 0 : 1);
-				if (bytes + rowBytes > budget.byteLimit) {
-					truncatedBy = "bytes";
-					return false;
+				for (const row of chunk) {
+					if (rows.length >= budget.rowLimit) {
+						truncatedBy = "rows";
+						return false;
+					}
+					const rowBytes = (yield* serializedByteLength(row)) + (rows.length === 0 ? 0 : 1);
+					if (bytes + rowBytes > budget.byteLimit) {
+						truncatedBy = "bytes";
+						return false;
+					}
+					rows.push(row);
+					bytes += rowBytes;
 				}
-				rows.push(row);
-				bytes += rowBytes;
-			}
-			return true;
+				return true;
+			});
 		},
 		rows: () => rows,
 		truncatedBy: () => truncatedBy,
@@ -400,11 +420,12 @@ export function formatSqlError(info: SqlErrorInfo): string {
 }
 
 /** Rethrow any database failure as a redacted, actionable error. */
-export function rethrowRedacted(err: unknown): never {
-	if (isToolHookError(err)) {
-		throw err;
-	}
-	throw new Error(formatSqlError(describeSqlError(err)));
+export function rethrowRedacted(err: unknown): Either.Either<never, Error> {
+	return Either.left(redactedError(err));
+}
+
+function redactedError(err: unknown): Error {
+	return isToolHookError(err) ? err : new Error(formatSqlError(describeSqlError(err)), { cause: err });
 }
 
 /**
@@ -412,11 +433,13 @@ export function rethrowRedacted(err: unknown): never {
  * interpolated because Postgres does not accept a bind parameter in `SET`; it is
  * a module constant re-validated here, never anything a caller supplied.
  */
-export function statementTimeoutStatement(): string {
-	if (!Number.isInteger(STATEMENT_TIMEOUT_MS) || STATEMENT_TIMEOUT_MS <= 0) {
-		fail("statement timeout must be a positive whole number of milliseconds");
-	}
-	return `SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`;
+export function statementTimeoutStatement(): Either.Either<string, Error> {
+	return Either.gen(function* () {
+		if (!Number.isInteger(STATEMENT_TIMEOUT_MS) || STATEMENT_TIMEOUT_MS <= 0) {
+			return yield* fail("statement timeout must be a positive whole number of milliseconds");
+		}
+		return `SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`;
+	});
 }
 
 /**
@@ -424,8 +447,10 @@ export function statementTimeoutStatement(): string {
  * `SET TRANSACTION READ WRITE`). Goes through `.cursor` like everything else so
  * this module has no simple-protocol call site at all.
  */
-async function executeUnit(tx: TransactionSql, statement: string): Promise<void> {
-	await tx.unsafe<SqlRow[]>(statement).cursor(1, () => {});
+function executeUnit(tx: TransactionSql, statement: string): Effect.Effect<void, Error> {
+	return Effect.asVoid(
+		tryPromiseOrOperationError(() => tx.unsafe<SqlRow[]>(statement).cursor(1, () => {})),
+	);
 }
 
 /**
@@ -433,19 +458,19 @@ async function executeUnit(tx: TransactionSql, statement: string): Promise<void>
  * open transaction. A frontend-authored message passes through as its own; a
  * driver-shaped failure is redacted like any other.
  */
-async function assertIdentity(tx: TransactionSql, hooks: McpToolHooks | undefined): Promise<void> {
+function assertIdentity(tx: TransactionSql, hooks: McpToolHooks | undefined): Effect.Effect<void, Error> {
 	const hook = hooks?.assertIdentity;
 	if (hook === undefined) {
-		return;
+		return Effect.void;
 	}
-	try {
-		await hook(tx);
-	} catch (err) {
-		const isDriverShaped = typeof fieldOf(err, "code") === "string";
-		throw toolHookError(
-			!isDriverShaped && err instanceof Error ? err.message : formatSqlError(describeSqlError(err)),
-		);
-	}
+	return Effect.flatMap(tryOrOperationError(() => hook(tx)), (effect) => effect).pipe(
+		Effect.mapError((err) => {
+			const isDriverShaped = typeof fieldOf(err, "code") === "string";
+			return Object.assign(toolHookError(!isDriverShaped ? err.message : formatSqlError(describeSqlError(err))), {
+				cause: err,
+			});
+		}),
+	);
 }
 
 /**
@@ -458,24 +483,17 @@ async function assertIdentity(tx: TransactionSql, hooks: McpToolHooks | undefine
  * assertion on a separate round trip proves nothing about the connection the
  * read then lands on.
  */
-export async function withReadTransaction<T>(
+export function withReadTransaction<T, E, R>(
 	sql: Sql,
 	hooks: McpToolHooks | undefined,
-	body: (tx: TransactionSql) => Promise<T>,
-): Promise<T> {
-	try {
-		// Boxed: postgres.js types `begin`'s result as `UnwrapPromiseArray<T>`, which
-		// TypeScript cannot reduce for a naked type parameter. A one-field box is a
-		// concrete object type, so the conditional resolves and no assertion is needed.
-		const boxed = await sql.begin("read only", async (tx) => {
-			await assertIdentity(tx, hooks);
-			await executeUnit(tx, statementTimeoutStatement());
-			return { value: await body(tx) };
-		});
-		return boxed.value;
-	} catch (err) {
-		rethrowRedacted(err);
-	}
+	body: (tx: TransactionSql) => Effect.Effect<T, E, R>,
+): Effect.Effect<T, E | Error, R> {
+	return runPostgresJsTransaction(sql, "read only", (tx) =>
+		Effect.gen(function* () {
+			yield* assertIdentity(tx, hooks);
+			yield* executeUnit(tx, yield* statementTimeoutStatement());
+			return yield* body(tx);
+		})).pipe(Effect.mapError(redactedError));
 }
 
 /**
@@ -528,57 +546,60 @@ export function runReadStatement(
 	statement: string,
 	budget: RowBudget,
 	hooks?: McpToolHooks,
-): Promise<ReadExecution> {
-	return withReadTransaction(sql, hooks, async (tx) => {
-		const accumulator = createRowAccumulator(budget);
-		let delivered: readonly SqlRow[] | null = null;
-		let stopped = false;
-		// The CALLBACK form of `.cursor`, deliberately, and three things depend on it.
-		//
-		// NOT the async-iterator form: it replaces the query's own resolver with one
-		// that throws its argument away (`node_modules/postgres/src/query.js:99`), and
-		// that argument is the `Result` holding the final partial chunk. Rows that
-		// crossed the wire and were parsed were then discarded inside the driver.
-		//
-		// NOT `.forEach`, which looks like the simpler fix and is not: `Query.forEach`
-		// (`node_modules/postgres/src/query.js:123-127`) does NOT set
-		// `options.simple = false` the way `.cursor` does at :75. With a bare
-		// `sql.unsafe(text)` that puts the statement back on the SIMPLE query protocol
-		// and reopens the stacked-statement execution this module exists to close (see
-		// the module header). It also has no way to stop early, so both caps would only
-		// apply after the whole result set had crossed the wire.
-		const final = await tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
-			delivered = chunk;
-			if (accumulator.add(chunk)) {
-				return undefined;
+): Effect.Effect<ReadExecution, Error> {
+	return withReadTransaction(sql, hooks, (tx) =>
+		Effect.gen(function* () {
+			const accumulator = createRowAccumulator(budget);
+			let delivered: readonly SqlRow[] | null = null;
+			let stopped = false;
+			// The CALLBACK form of `.cursor`, deliberately, and three things depend on it.
+			//
+			// NOT the async-iterator form: it replaces the query's own resolver with one
+			// that throws its argument away (`node_modules/postgres/src/query.js:99`), and
+			// that argument is the `Result` holding the final partial chunk. Rows that
+			// crossed the wire and were parsed were then discarded inside the driver.
+			//
+			// NOT `.forEach`, which looks like the simpler fix and is not: `Query.forEach`
+			// (`node_modules/postgres/src/query.js:123-127`) does NOT set
+			// `options.simple = false` the way `.cursor` does at :75. With a bare
+			// `sql.unsafe(text)` that puts the statement back on the SIMPLE query protocol
+			// and reopens the stacked-statement execution this module exists to close (see
+			// the module header). It also has no way to stop early, so both caps would only
+			// apply after the whole result set had crossed the wire.
+			const final = yield* tryPromiseOrOperationError(() =>
+				tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
+					delivered = chunk;
+					if (Either.getOrThrowWith(accumulator.add(chunk), (error) => error)) {
+						return undefined;
+					}
+					stopped = true;
+					// `sql.CLOSE` is the driver's documented stop sentinel
+					// (`node_modules/postgres/src/index.js:73`). Returning it takes the same
+					// `Close(portal)` path the async iterator's `return()` used, so stopping at
+					// a cap is unchanged in timing and in chunk granularity.
+					return sql.CLOSE;
+				})
+			);
+			// postgres.js hands the LAST partial chunk to the cursor callback only when the
+			// command tag carries a row count (`connection.js:611-614`, `result.count &&
+			// query.cursorFn(result)`). Postgres appends a count to `SELECT`, `INSERT`,
+			// `UPDATE`, `DELETE`, `MERGE`, `MOVE`, `FETCH` and `COPY` and to nothing else,
+			// so utility statements — `EXPLAIN`, `SHOW` — lost their trailing rows entirely
+			// while the result still claimed to be complete.
+			//
+			// `stopped` is required, not defensive: `CloseComplete`
+			// (`connection.js:852-855`) also resolves with a row-bearing `Result`, so
+			// appending after an early stop could carry the result PAST the cap that
+			// stopped it.
+			//
+			// The residual goes through `accumulator.add` like every other chunk and never
+			// straight onto the rows array, so both caps — and any whole-payload accounting
+			// the accumulator grows later — apply to it exactly as they do to the rest.
+			if (!stopped) {
+				yield* accumulator.add(residualRows(final, delivered));
 			}
-			stopped = true;
-			// `sql.CLOSE` is the driver's documented stop sentinel
-			// (`node_modules/postgres/src/index.js:73`). Returning it takes the same
-			// `Close(portal)` path the async iterator's `return()` used, so stopping at
-			// a cap is unchanged in timing and in chunk granularity.
-			return sql.CLOSE;
-		});
-		// postgres.js hands the LAST partial chunk to the cursor callback only when the
-		// command tag carries a row count (`connection.js:611-614`, `result.count &&
-		// query.cursorFn(result)`). Postgres appends a count to `SELECT`, `INSERT`,
-		// `UPDATE`, `DELETE`, `MERGE`, `MOVE`, `FETCH` and `COPY` and to nothing else,
-		// so utility statements — `EXPLAIN`, `SHOW` — lost their trailing rows entirely
-		// while the result still claimed to be complete.
-		//
-		// `stopped` is required, not defensive: `CloseComplete`
-		// (`connection.js:852-855`) also resolves with a row-bearing `Result`, so
-		// appending after an early stop could carry the result PAST the cap that
-		// stopped it.
-		//
-		// The residual goes through `accumulator.add` like every other chunk and never
-		// straight onto the rows array, so both caps — and any whole-payload accounting
-		// the accumulator grows later — apply to it exactly as they do to the rest.
-		if (!stopped) {
-			accumulator.add(residualRows(final, delivered));
-		}
-		return { command: commandTag(final), rows: accumulator.rows(), truncatedBy: accumulator.truncatedBy() };
-	});
+			return { command: commandTag(final), rows: accumulator.rows(), truncatedBy: accumulator.truncatedBy() };
+		}));
 }
 
 /**
@@ -621,41 +642,43 @@ function rowsAffected(tagCount: number, rowsSeen: number): number | null {
  * a DEFAULT, not a lock. It is not what makes the write safe: the write is
  * bounded by what the role has been granted and by nothing in this file.
  */
-export async function runWriteStatement(
+export function runWriteStatement(
 	sql: Sql,
 	statement: string,
 	budget: RowBudget,
 	hooks?: McpToolHooks,
-): Promise<WriteExecution> {
-	try {
-		return await sql.begin(async (tx) => {
+): Effect.Effect<WriteExecution, Error> {
+	return runPostgresJsTransaction(sql, "", (tx) =>
+		Effect.gen(function* () {
 			// The promotion comes first: `SET TRANSACTION` is only legal before the
 			// transaction has run a query, and the identity assertion is a query.
-			await executeUnit(tx, "SET TRANSACTION READ WRITE");
-			await assertIdentity(tx, hooks);
-			await executeUnit(tx, statementTimeoutStatement());
+			yield* executeUnit(tx, "SET TRANSACTION READ WRITE");
+			yield* assertIdentity(tx, hooks);
+			yield* executeUnit(tx, yield* statementTimeoutStatement());
 			const accumulator = createRowAccumulator(budget);
 			let delivered: readonly SqlRow[] | null = null;
 			let rowsSeen = 0;
-			const result = await tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
-				delivered = chunk;
-				rowsSeen += chunk.length;
-				// `undefined`, ALWAYS — never `sql.CLOSE`, which is what the read path
-				// returns at its cap. The two paths stop differently on purpose. A read
-				// has nothing left to finish, so closing its portal costs nothing; closing
-				// the portal of an `INSERT … RETURNING` stops the statement MID-EXECUTION
-				// and the transaction then commits whatever ran. A caller who asked to
-				// insert 10000 rows would get some prefix of them written and a receipt
-				// calling the result merely truncated — the worst outcome this change can
-				// have, and it is one returned value away.
-				//
-				// So the callback keeps being called for every remaining chunk, the portal
-				// drains, the statement completes and commits exactly once, and the rows
-				// past the cap cost only the chunk they arrived in. `add`'s `false` is
-				// ignored deliberately: it says "stop KEEPING", not "stop reading".
-				accumulator.add(chunk);
-				return undefined;
-			});
+			const result = yield* tryPromiseOrOperationError(() =>
+				tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
+					delivered = chunk;
+					rowsSeen += chunk.length;
+					// `undefined`, ALWAYS — never `sql.CLOSE`, which is what the read path
+					// returns at its cap. The two paths stop differently on purpose. A read
+					// has nothing left to finish, so closing its portal costs nothing; closing
+					// the portal of an `INSERT … RETURNING` stops the statement MID-EXECUTION
+					// and the transaction then commits whatever ran. A caller who asked to
+					// insert 10000 rows would get some prefix of them written and a receipt
+					// calling the result merely truncated — the worst outcome this change can
+					// have, and it is one returned value away.
+					//
+					// So the callback keeps being called for every remaining chunk, the portal
+					// drains, the statement completes and commits exactly once, and the rows
+					// past the cap cost only the chunk they arrived in. `add`'s `false` is
+					// ignored deliberately: it says "stop KEEPING", not "stop reading".
+					Either.getOrThrowWith(accumulator.add(chunk), (error) => error);
+					return undefined;
+				})
+			);
 			// The identical lost-last-chunk defect and the identical double-count hazard
 			// as the read path: see `runReadStatement` for the mechanism, for why the
 			// discriminator is object identity rather than `count`, and for why
@@ -668,15 +691,12 @@ export async function runWriteStatement(
 			// here, and the accumulator refuses rows past its cap by itself.
 			const residual = residualRows(result, delivered);
 			rowsSeen += residual.length;
-			accumulator.add(residual);
+			yield* accumulator.add(residual);
 			return {
 				command: result.command,
 				rowsAffected: rowsAffected(result.count, rowsSeen),
 				rows: accumulator.rows(),
 				truncatedBy: accumulator.truncatedBy(),
 			};
-		});
-	} catch (err) {
-		rethrowRedacted(err);
-	}
+		})).pipe(Effect.mapError(redactedError));
 }
