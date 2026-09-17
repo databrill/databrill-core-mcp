@@ -431,7 +431,7 @@ const program = Effect.gen(function* () {
 		]),
 	);
 
-	const cli = Command.run(root, { name: "core-mcp", version: "0.2.6" });
+	const cli = Command.run(root, { name: "core-mcp", version: "0.2.7" });
 
 	return yield* cli(process.argv);
 }).pipe(Effect.scoped);

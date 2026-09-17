@@ -29,7 +29,7 @@ const program = Effect.gen(function* () {
 		Effect.suspend(() =>
 			tryOrOperationError(() =>
 				new Server(
-					{ name: "databrill-core-mcp", version: "0.2.6" },
+					{ name: "databrill-core-mcp", version: "0.2.7" },
 					{ capabilities: { tools: {} } },
 				)
 			)
