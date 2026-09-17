@@ -2,7 +2,7 @@ import { Effect, Either } from "effect";
 import { tryOrOperationError } from "../../effectErrors.ts";
 import type postgres from "postgres";
 import { Schema } from "effect";
-import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { createCanonicalQueryBuilder, probeRelations } from "@jsr/databrill__core-pg-kysely/canonical";
 import {
 	type AliasedExpression,
 	type Expression,
@@ -78,7 +78,9 @@ export type GroupByDim = typeof VALID_GROUP_BY[number];
 export const VALID_TIME_UNITS = ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] as const;
 export type TimeUnit = typeof VALID_TIME_UNITS[number];
 
-const ASIN_PATTERN = /^B0[A-Z0-9]{8}$/i;
+// A regular ASIN, or a book ASIN: Amazon uses the ISBN-10 (nine digits and a
+// check digit that may be `X`) as the ASIN of a book listing.
+const ASIN_PATTERN = /^(B0[A-Z0-9]{8}|[0-9]{9}[0-9X])$/i;
 const UNRESOLVED_ASIN = "B0000000000";
 
 // ---------------------------------------------------------------------------
@@ -417,6 +419,10 @@ export function resolveProducts(
 		const db = createCanonicalQueryBuilder();
 		const tokens = productsStr.split(",").map((s) => s.trim()).filter(Boolean);
 		const childAsins = new Set<string>();
+		// Only a family-name token reads the family table, so only then is it probed.
+		const familyTable = tokens.some((token) => !ASIN_PATTERN.test(token))
+			? (yield* probeFamilyTable(db, sql))
+			: false;
 
 		for (const token of tokens) {
 			if (ASIN_PATTERN.test(token)) {
@@ -438,12 +444,14 @@ export function resolveProducts(
 				}
 			} else {
 				// Family name lookup
-				const rows = yield* runCompiled(
-					sql,
-					() =>
-						db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token)
-							.compile(),
-				);
+				const rows = familyTable
+					? yield* runCompiled(
+						sql,
+						() =>
+							db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token)
+								.compile(),
+					)
+					: [];
 				if (rows.length === 0) {
 					console.error(`Warning: no ASINs found for family '${token}'`);
 				}
@@ -453,6 +461,23 @@ export function resolveProducts(
 
 		return [...childAsins];
 	});
+}
+
+/**
+ * Whether this workspace has `brand_config_amazon_asin`.
+ *
+ * No application code creates the table; only the `initRemoteTables` CLI does,
+ * so a workspace that has never had brand configuration has none. That is a
+ * normal state, not a failure: a family name then matches no ASIN, and the
+ * family dimension reports every ASIN under a null family, exactly as it does
+ * for an ASIN the table does not map. The probe asks `to_regclass` against the
+ * connection's `search_path`, the same question the queries themselves ask.
+ */
+function probeFamilyTable(db: CanonicalDb, sql: postgres.Sql): Effect.Effect<boolean, Error> {
+	return Effect.map(
+		probeRelations(db, sql, ["brand_config_amazon_asin"]),
+		(present) => present.has("brand_config_amazon_asin"),
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -702,9 +727,10 @@ function dimPlan(dims: GroupByDim[]): DimPlan {
  * exist on `amzadapi_reports_v1__search_asin_placement__byDay` and NOT on
  * `amzadapi_reports_v1__product01__byDay`, in the generated `DB` and in the
  * fixture schema alike. So one TYPED builder cannot serve both — `eb.ref("r.target")`
- * would not compile against the halo-in query. Today `--groupBy target` or
- * `--groupBy placement` makes query 2 fail at runtime, and that is existing
- * behaviour which is preserved here deliberately rather than fixed.
+ * would not compile against the halo-in query. Today `--groupBy target` makes
+ * query 2 fail at runtime, and that is existing behaviour which is preserved
+ * here deliberately rather than fixed; `buildQuery2` leaves `placement` out of
+ * its dimensions instead.
  *
  * The consequence, and it is worth stating rather than reading as an oversight:
  * every `r.` / `camp.` / `ad.` / `fam.` / `cat.` reference in the dimension
@@ -770,6 +796,7 @@ function buildDimExprs(
 	dims: GroupByDim[],
 	stores: ResolvedStore[],
 	resolvedAsin: RawBuilder<string>,
+	familyTable: boolean,
 ): Either.Either<DimExprs, Error> {
 	return Either.gen(function* () {
 		const selectExprs: AliasedExpression<unknown, string>[] = [];
@@ -781,10 +808,17 @@ function buildDimExprs(
 					selectExprs.push(resolvedAsin.as("asin"));
 					groupBy.push({ key: "resolvedAsin", expr: resolvedAsin });
 					break;
-				case "family":
-					selectExprs.push(ksql.ref<string | null>("fam.family").as("family"));
-					groupBy.push({ key: `fam.family`, expr: ksql.ref("fam.family") });
+				case "family": {
+					// Without the family table there is no `fam` to read, so every ASIN is
+					// unmapped: `NULL::text`, which is an expression Postgres accepts in a
+					// GROUP BY where a bare `NULL` is a rejected constant.
+					const family = familyTable
+						? ksql.ref<string | null>("fam.family")
+						: ksql<string | null>`NULL::text`;
+					selectExprs.push(family.as("family"));
+					groupBy.push({ key: `fam.family`, expr: family });
 					break;
+				}
 				case "parentAsin":
 					selectExprs.push(ksql.ref<string | null>("cat.parent_asin").as("parentAsin"));
 					groupBy.push({ key: `cat.parent_asin`, expr: ksql.ref("cat.parent_asin") });
@@ -923,11 +957,12 @@ interface QueryJoins extends DimJoinFlags {
 	readonly needsCampFiltJoin: boolean;
 }
 
-function queryJoins(plan: DimPlan, filter: FilterExpr | null): QueryJoins {
+function queryJoins(plan: DimPlan, filter: FilterExpr | null, familyTable: boolean): QueryJoins {
 	return {
 		needsCampaignJoin: plan.needsCampaignJoin,
 		needsAdJoin: plan.needsAdJoin,
-		needsFamilyJoin: plan.needsFamilyJoin,
+		// A workspace without the family table has nothing to join; see `probeFamilyTable`.
+		needsFamilyJoin: plan.needsFamilyJoin && familyTable,
 		needsParentAsinJoin: plan.needsParentAsinJoin,
 		needsCampFiltJoin: filter !== null && !plan.needsCampaignJoin,
 	};
@@ -1017,6 +1052,7 @@ function buildQuery1(
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
+	familyTable: boolean,
 ) {
 	return Either.gen(function* () {
 		const plan = dimPlan(dims);
@@ -1024,7 +1060,7 @@ function buildQuery1(
 		// One expression object, reused in the SELECT list, the GROUP BY, the two
 		// optional joins and the `--products` predicate: identical text everywhere.
 		const resolvedAsin = resolvedAsinExpr();
-		const dims1 = yield* buildDimExprs(dims, stores, resolvedAsin);
+		const dims1 = yield* buildDimExprs(dims, stores, resolvedAsin, familyTable);
 		const currency = yield* currencyCaseExpr(stores);
 
 		const groupByCols: GroupByEntry[] = [];
@@ -1033,7 +1069,7 @@ function buildQuery1(
 		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
 		groupByCols.push(...dims1.groupBy);
 
-		let query = query1Base(db, stores, queryJoins(plan, filter))
+		let query = query1Base(db, stores, queryJoins(plan, filter, familyTable))
 			.select((eb) => [
 				currency,
 				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
@@ -1139,6 +1175,7 @@ function buildQuery2(
 	timeUnit: TimeUnit | null,
 	productAsins: string[] | null,
 	filter: FilterExpr | null,
+	familyTable: boolean,
 ) {
 	return Either.gen(function* () {
 		// For halo-in, the ASIN is convertedProductId (which product received the halo).
@@ -1146,7 +1183,15 @@ function buildQuery2(
 		const plan = dimPlan(dims);
 		const productGrain = isProductGrain(dims);
 		const resolvedAsin = resolvedAsinExprProduct01();
-		const dims2 = yield* buildDimExprs(dims, stores, resolvedAsin);
+		// product01 has no placement column, so halo-in cannot be split by placement:
+		// this query groups without it and reports its rows under a NULL placement,
+		// which `mergeResults` keeps as their own output row.
+		const dims2 = yield* buildDimExprs(
+			dims.filter((dim) => dim !== "placement"),
+			stores,
+			resolvedAsin,
+			familyTable,
+		);
 		const currency = yield* currencyCaseExpr(stores);
 
 		const groupByCols: GroupByEntry[] = [];
@@ -1154,11 +1199,12 @@ function buildQuery2(
 		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
 		groupByCols.push(...dims2.groupBy);
 
-		let query = query2Base(db, stores, queryJoins(plan, filter))
+		let query = query2Base(db, stores, queryJoins(plan, filter, familyTable))
 			.select((eb) => [
 				currency,
 				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
 				...dims2.selectExprs,
+				...(dims.includes("placement") ? [ksql<null>`NULL`.as("placement")] : []),
 				// Halo-in metrics
 				eb.fn.sum<string | null>("r.purchases").as("purchasesHaloIn"),
 				eb.fn.sum<string | null>("r.unitsSold").as("unitsHaloIn"),
@@ -1231,7 +1277,7 @@ function mergeResults(
 	// expressions (e.g. adType) collapse multiple raw groups into one output
 	// label. Merge those collisions by summing numeric columns; otherwise
 	// later Map-based indexing would silently drop all but the last colliding
-	// row. See benchmark notes 2026-04-25 for the SBV / BRAND_VIDEO case.
+	// row.
 	const aggregatedQ1 = collapseByKey(q1Rows, keyCols);
 	const aggregatedQ2 = collapseByKey(q2Rows, keyCols);
 
@@ -1472,12 +1518,21 @@ export function loadAds(
 		);
 		const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
 
+		// Only the family dimension reads the family table, so only then is it probed.
+		const familyTable = groupByDims.includes("family") ? (yield* probeFamilyTable(db, sql)) : false;
+
 		// Build and run both statements. Each compiles its own parameter list, and a
 		// non-empty list also puts them on the extended protocol, where stacked
 		// statements are rejected.
 		const [q1Rows, q2Rows] = yield* Effect.all([
-			runCompiled(sql, yield* buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
-			runCompiled(sql, yield* buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter)),
+			runCompiled(
+				sql,
+				yield* buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+			),
+			runCompiled(
+				sql,
+				yield* buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+			),
 		], { concurrency: 2 });
 
 		// Merge results

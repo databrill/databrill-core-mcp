@@ -12,7 +12,7 @@ export interface PerAsinEconomics {
 	price: number;
 	cogs: number;
 	fbaPickPack: number;
-	referralPct: number; // e.g. 0.15
+	referralPct: number; // e.g. 0.15, a common Amazon referral fee rate
 	storage: number;
 	source: "sheet" | "default" | "missing";
 }

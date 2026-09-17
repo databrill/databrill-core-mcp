@@ -61,9 +61,10 @@ function aggregate(days: DayMetric[]): WindowAgg {
 		w.units += d.units;
 		w.orders += d.orders;
 		w.sessions += d.sessions;
-		// Sessions (Sales & Traffic) lag the fresh ALL_ORDERS sales by a day or
-		// two, so accumulate the session-based factors only over days that have
-		// session data, keeping traffic and conversion aligned with each other.
+		// Sessions (Amazon's Sales & Traffic report) lag the fresh ALL_ORDERS
+		// sales by a day or two, so accumulate the session-based factors only over
+		// days that have session data, keeping traffic and conversion aligned with
+		// each other.
 		if (d.hasSessions) {
 			w.sessionDays += 1;
 			w.sessionUnits += d.units;
@@ -338,12 +339,13 @@ export function load(config: LoadConfig, sql: Sql): Effect.Effect<StoreDiagnosis
 
 			// Anchor the analysis to the latest day Sales & Traffic has reported
 			// (when it's recent enough), so every window is a FULL recentDays /
-			// baselineDays span that is also session-covered. Sales & Traffic lags
-			// the fresh ALL_ORDERS tail by a day or two; analysing through that
-			// horizon keeps whole 7-day weeks — day-of-week cycles dominate, so a
-			// short final week would distort traffic vs a 4-week baseline — and a
-			// self-consistent, exact traffic/conversion/price split. With no (or
-			// badly stale) sessions, fall back to the freshest days, price-only.
+			// baselineDays span that is also session-covered. Amazon's Sales &
+			// Traffic report lags the fresh ALL_ORDERS tail by a day or two;
+			// analysing through that horizon keeps whole 7-day weeks — day-of-week
+			// cycles dominate, so a short final week would distort traffic vs a
+			// 4-week baseline — and a self-consistent, exact
+			// traffic/conversion/price split. With no (or badly stale) sessions,
+			// fall back to the freshest days, price-only.
 			const lastSessionIdx = sd.days.map((d) => d.hasSessions).lastIndexOf(true);
 			const useSessions = lastSessionIdx >= 0 &&
 				(sd.days.length - 1 - lastSessionIdx) <= config.recentDays;

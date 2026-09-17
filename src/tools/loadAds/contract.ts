@@ -76,7 +76,7 @@ export const loadAdsTool = {
 		"Fetch Amazon advertising performance metrics aggregated by configurable dimensions (asin, family, parentAsin, " +
 		"campaign, adType, placement, target, adgroup, country, store, merchant, marketplaceId), optionally over a time " +
 		"unit. Returns impressions, clicks, addToCart, purchases, units, spend, revenue, and halo (cross-product) metrics; " +
-		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; data lags 1-2 days.",
+		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; Amazon's ad reports lag 1-2 days.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
 		Effect.flatMap(parseParams(args), (params) => loadAds(params, sql)),

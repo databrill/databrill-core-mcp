@@ -38,11 +38,9 @@ export interface SqpPeriodRow {
  *
  * A market rate must be derived from these counts and NEVER from the report's
  * `clickData->totalClickRate` / `purchaseData->totalPurchaseRate` columns, which
- * are per-search rather than per-impression: on piotr DE, week 2026-07-26,
- * `bettdecke 200x220` carries `totalClickRate = 44.16` against a real
- * clicks/impressions of 1.86%. The `dbl-metrics-sqp` skill's "Your Performance vs
- * Market Average" query builds a market CTR out of `totalClickRate` and looks
- * exactly like a reference implementation worth porting. It is not.
+ * are computed by Amazon against the query's search volume rather than its
+ * impressions, so they do not combine with impression counts into a market CTR.
+ * The `dbl-metrics-sqp` skill gives the same warning.
  */
 export interface SqpKeywordRow {
 	readonly q: string;
