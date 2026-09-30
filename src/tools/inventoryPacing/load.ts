@@ -12,7 +12,7 @@ import { sinceDaysAgo } from "../../clientData.ts";
 import { groupByWith } from "../../groupByWith.ts";
 import { summarizeAdMetrics } from "../../summarizeAdMetrics.ts";
 import { resolveStores } from "../loadAds/loadAds.ts";
-import { loadLowInventory } from "./lowInventory.ts";
+import { effectiveVelocityDays, loadLowInventory } from "./lowInventory.ts";
 import { loadFamilyWindow } from "./familyWindow.ts";
 import type {
 	LoadInventoryPacingParams,
@@ -28,7 +28,7 @@ interface FamilyInv {
 	family: string;
 	available: number;
 	inbound: number;
-	units7d: number;
+	unitsPerDay: number;
 	worstAsin: string | null;
 	worstAsinLabel: string | null;
 	worstAsinRunway: number | null;
@@ -170,7 +170,7 @@ const actionRank: Record<PacingAction, number> = { pause: 0, throttle: 1, ramp: 
 
 function resolveConfig(p: LoadInventoryPacingParams): PacingConfig {
 	return {
-		velocityDays: p.velocityDays ?? 7,
+		velocityDays: effectiveVelocityDays(p.velocityDays ?? 7),
 		spendWindowDays: p.spendWindowDays ?? 7,
 		criticalDays: p.criticalDays ?? 7,
 		lowDays: p.lowDays ?? 21,
@@ -204,7 +204,7 @@ export function loadInventoryPacing(
 					family: r.family,
 					available: 0,
 					inbound: 0,
-					units7d: 0,
+					unitsPerDay: 0,
 					worstAsin: null,
 					worstAsinLabel: null,
 					worstAsinRunway: null,
@@ -213,7 +213,7 @@ export function loadInventoryPacing(
 			}
 			f.available += r.inventoryFba + r.inventoryFbm;
 			f.inbound += r.inbound;
-			f.units7d += r.units7d;
+			f.unitsPerDay += r.unitsPerDay;
 			if (r.runway != null && (f.worstAsinRunway == null || r.runway < f.worstAsinRunway)) {
 				f.worstAsinRunway = r.runway;
 				f.worstAsin = r.asin;
@@ -238,7 +238,7 @@ export function loadInventoryPacing(
 
 		const out: PacingRow[] = [];
 		for (const [key, f] of fams) {
-			const velocityPerDay = f.units7d / Math.max(1, config.velocityDays);
+			const velocityPerDay = f.unitsPerDay;
 			const runwayDays = velocityPerDay > 0 ? f.available / velocityPerDay : null;
 			const runwayWithInboundDays = velocityPerDay > 0 ? (f.available + f.inbound) / velocityPerDay : null;
 

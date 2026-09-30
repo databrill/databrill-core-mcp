@@ -57,7 +57,10 @@ export const loadTflInventoryTool = {
 		"Fetch The Fulfillment Lab (GFS) product inventory at each connector's latest daily warehouse snapshot, " +
 		"or the latest snapshot on/before a requested date. Returns product names, product ids, warehouse, on-hand, " +
 		"allocated, available, and product-id-based SKU mappings. Filters by exact product id/name/SKU, warehouse, " +
-		"or maximum available units. Reads the client DB tfl_products_v1 inventory tables.",
+		"or maximum available units. Reads the client DB tfl_products_v1 inventory tables. Rows are ordered by " +
+		"available units, lowest first, and capped by limit; meta.isTruncated says when more matched. " +
+		"meta.quantityTotal, allocatedTotal and availableTotal sum only the returned rows. When the workspace lacks " +
+		"the TFL tables the result is empty and meta.missingTables names them.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) => loadTflInventory(parseParams(args), sql),
 };

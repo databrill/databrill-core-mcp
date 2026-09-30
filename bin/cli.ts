@@ -206,7 +206,10 @@ const program = Effect.gen(function* () {
 				Options.withDescription("WEEK (default) | MONTH"),
 				Options.optional,
 			),
-			keywordLimit: Options.integer("keywordLimit").pipe(Options.optional),
+			keywordLimit: Options.integer("keywordLimit").pipe(
+				Options.withDescription("Top-N search queries by market impressions, 1-200 (default 25)"),
+				Options.optional,
+			),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -431,7 +434,7 @@ const program = Effect.gen(function* () {
 		]),
 	);
 
-	const cli = Command.run(root, { name: "core-mcp", version: "0.2.7" });
+	const cli = Command.run(root, { name: "core-mcp", version: "0.2.8" });
 
 	return yield* cli(process.argv);
 }).pipe(Effect.scoped);

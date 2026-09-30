@@ -17,6 +17,7 @@ export interface LowInventoryRow {
 	units1d: number;
 	units7d: number;
 	units28d: number;
+	unitsPerDay: number; // units sold over the velocity window, divided by its days
 	inventoryFba: number;
 	inventoryFbm: number;
 	inbound: number;
@@ -47,7 +48,7 @@ export interface PacingRow {
 
 export interface LoadInventoryPacingParams {
 	stores: string; // country/region/marketplaceId/'*'/{merchantId}-{scope}
-	velocityDays?: number | undefined; // units/day window (default 7)
+	velocityDays?: number | undefined; // units/day window, 1 to 28 (default 7)
 	spendWindowDays?: number | undefined; // ad spend/day window (default 7)
 	criticalDays?: number | undefined; // runway ≤ → pause (default 7)
 	lowDays?: number | undefined; // runway ≤ → throttle (default 21)

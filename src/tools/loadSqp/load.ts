@@ -24,6 +24,13 @@
  * "market impressions for the terms this product set appears on", which is the
  * right denominator for a scoped share. Do not move it outside.
  *
+ * Rows with an empty `searchQuery` are excluded inside the CTE, so both
+ * statements leave them out. Amazon's report leaves the term empty on some
+ * rows, and the empty term stands for a different search in each period and
+ * marketplace: its market figures are not one search's, and summing it across
+ * periods would produce a keyword row made of unrelated searches that also
+ * takes a top-N slot.
+ *
  * Verifying the repeated-constant assumption on a workspace that looks off:
  *   SELECT count(*) FROM (
  *     SELECT 1 FROM "amzreport_SEARCH_QUERY_PERFORMANCE"
@@ -43,8 +50,10 @@ import { isoDateParam, runCompiled } from "../../runCompiled.ts";
 import { jsonbInt } from "../../sqlJson.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import {
+	DEFAULT_KEYWORD_LIMIT,
 	type LoadSqpParams,
 	type LoadSqpResult,
+	MAX_KEYWORD_LIMIT,
 	type SqpKeywordRow,
 	type SqpPeriodRow,
 	type SqpTimeUnit,
@@ -63,6 +72,24 @@ function share(part: number, whole: number): number {
 	return whole > 0 ? round3((part / whole) * 100) : 0;
 }
 
+/** Validate keywordLimit: a whole number from 1 to MAX_KEYWORD_LIMIT; above the maximum is rejected, not clamped. */
+export function parseKeywordLimit(value: number | undefined): Either.Either<number, Error> {
+	return Either.gen(function* () {
+		if (value === undefined) {
+			return DEFAULT_KEYWORD_LIMIT;
+		}
+		if (!Number.isInteger(value) || value < 1) {
+			return yield* fail(`keywordLimit must be a whole number from 1 to ${MAX_KEYWORD_LIMIT}`);
+		}
+		if (value > MAX_KEYWORD_LIMIT) {
+			return yield* fail(
+				`keywordLimit ${value} exceeds the maximum of ${MAX_KEYWORD_LIMIT}; request ${MAX_KEYWORD_LIMIT} or fewer`,
+			);
+		}
+		return value;
+	});
+}
+
 export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect<LoadSqpResult, Error> {
 	return Effect.gen(function* () {
 		if (!params.stores) return yield* fail("stores is required");
@@ -72,7 +99,7 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 		if (!VALID_SQP_TIME_UNITS.includes(timeUnit)) {
 			return yield* fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_SQP_TIME_UNITS.join(", ")}`);
 		}
-		const keywordLimit = params.keywordLimit ?? 25;
+		const keywordLimit = yield* parseKeywordLimit(params.keywordLimit);
 
 		const stores = yield* resolveStores(params.stores, sql);
 		const marketplaceIds = [...new Set(stores.map((s) => s.marketplaceId))];
@@ -115,6 +142,8 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 			.where("marketplaceId", "in", marketplaceIds)
 			.where("dateFirst", ">=", isoDateParam(range.dateFirst))
 			.where("dateFirst", "<=", isoDateParam(range.dateLast))
+			// The empty search term is excluded here, so both statements leave it out — see the module doc.
+			.where("searchQuery", "<>", "")
 			.groupBy(["marketplaceId", "dateFirst", "searchQuery"]);
 		// The products filter stays INSIDE the CTE — see the module doc.
 		if (asins !== null) {

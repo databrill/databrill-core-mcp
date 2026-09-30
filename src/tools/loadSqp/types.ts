@@ -10,6 +10,11 @@
  */
 
 export const VALID_SQP_TIME_UNITS = ["WEEK", "MONTH"] as const;
+
+/** Top-N search queries returned when keywordLimit is not given. */
+export const DEFAULT_KEYWORD_LIMIT = 25;
+/** The largest keywordLimit accepted; a larger request is rejected, not clamped. */
+export const MAX_KEYWORD_LIMIT = 200;
 export type SqpTimeUnit = typeof VALID_SQP_TIME_UNITS[number];
 
 /** Our-vs-market totals for one marketplace in one SQP period. */
@@ -60,7 +65,7 @@ export interface LoadSqpParams {
 	readonly when: string;
 	readonly products?: string | undefined; // optional family/parent/child ASIN filter
 	readonly timeUnit?: string | undefined; // WEEK (default) | MONTH
-	readonly keywordLimit?: number | undefined; // top-N keywords by market impressions (default 25)
+	readonly keywordLimit?: number | undefined; // top-N keywords by market impressions, 1 to 200 (default 25)
 }
 
 export interface LoadSqpResult {

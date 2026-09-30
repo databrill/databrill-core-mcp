@@ -7,15 +7,16 @@
  * FAMILY levels do not merge marketplace rows that this public result retains.
  */
 
-import { Effect, Either } from "effect";
 import {
 	type AmazonReportSalesAndTrafficResult,
 	type AmazonReportSalesAndTrafficRow,
 	type CanonicalLevel,
 	type CanonicalWindow,
 	createCanonicalQueryBuilder,
-	readAmazonReportSalesAndTraffic,
+	loadAmazonReportSalesAndTraffic,
+	MISSING_FAMILY,
 } from "@jsr/databrill__core-pg-kysely/canonical";
+import { Effect, Either } from "effect";
 import type postgres from "postgres";
 import {
 	type DateRange,
@@ -131,7 +132,7 @@ function mapTrafficRow(
 		cr: round2(numberMeasure(row, "unitSessionPercentage")),
 	};
 	if (groupBy === "family") {
-		out.family = row.key["family"] ?? "(unmapped)";
+		out.family = row.key["family"] ?? MISSING_FAMILY;
 	} else {
 		out.asin = row.key["asin"] ?? "";
 	}
@@ -169,12 +170,12 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 
 		const db = createCanonicalQueryBuilder();
 		const level: CanonicalLevel = groupBy === "family" ? "FAMILY" : "ASIN";
-		function readGroup(
+		function loadGroup(
 			group: MarketplaceGroup,
 			window: CanonicalWindow,
 			measures: readonly string[],
 		): Effect.Effect<AmazonReportSalesAndTrafficResult, Error> {
-			return readAmazonReportSalesAndTraffic(db, sql, {
+			return loadAmazonReportSalesAndTraffic(db, sql, {
 				level,
 				timeGranularity: timeUnit,
 				window,
@@ -189,7 +190,7 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 			range = when.range;
 		} else {
 			const probes = yield* Effect.all(
-				marketplaceGroups.map((group) => readGroup(group, { kind: "trailingDays", days: 1 }, ["sessions"])),
+				marketplaceGroups.map((group) => loadGroup(group, { kind: "trailingDays", days: 1 }, ["sessions"])),
 				{ concurrency: "unbounded" },
 			);
 			let earliestDate: string | null = null;
@@ -214,7 +215,7 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 
 		const canonicalResults = yield* Effect.all(
 			marketplaceGroups.map((group) =>
-				readGroup(
+				loadGroup(
 					group,
 					{ kind: "explicit", dateFirst: range.dateFirst, dateLast: range.dateLast },
 					LOAD_TRAFFIC_CANONICAL_MEASURES,

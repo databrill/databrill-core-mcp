@@ -7,10 +7,10 @@
  * explicit source.
  */
 
+import { createCanonicalQueryBuilder, MISSING_FAMILY } from "@jsr/databrill__core-pg-kysely/canonical";
 import { Effect } from "effect";
-import type postgres from "postgres";
-import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { sql as ksql } from "kysely";
+import type postgres from "postgres";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { groupByWith } from "../../groupByWith.ts";
 import { isoDateParam, runCompiled } from "../../runCompiled.ts";
@@ -78,7 +78,7 @@ export function loadFamilyWindow(
 								// `sql.lit`, not `eb.val`: this COALESCE is in both the SELECT list and
 								// the GROUP BY, and Postgres matches those by parse-tree equality, so two
 								// placeholders for the same literal would be rejected at runtime.
-								eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)).as("family"),
 								eb.cast<string | null>(eb.val<string | null>(null), "text").as("source"),
 								eb.cast<string | null>(eb.fn.sum<string | null>("ad.impressions"), "numeric").as(
 									"adImpressions",
@@ -105,7 +105,7 @@ export function loadFamilyWindow(
 							.groupBy((eb) => [
 								"ad.merchantId",
 								"ad.marketplaceId",
-								eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)),
 							]))
 					.with("sb_by_ad", (qb) =>
 						qb
@@ -171,7 +171,7 @@ export function loadFamilyWindow(
 							.select((eb) => [
 								"sb.merchantId",
 								"sb.marketplaceId",
-								eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)).as("family"),
 								eb.cast<string>(eb.val(SB_RESIDUAL_FIRST_ASIN), "text").as("source"),
 								eb.cast<string | null>(
 									eb.fn.sum<string | null>("sb.residual_impressions"),
@@ -212,7 +212,7 @@ export function loadFamilyWindow(
 							.groupBy((eb) => [
 								"sb.merchantId",
 								"sb.marketplaceId",
-								eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)),
 							]))
 					.selectFrom("certain")
 					.select([
@@ -252,7 +252,7 @@ export function loadFamilyWindow(
 					.select((eb) => [
 						eb.ref("ao.merchant_id").as("merchantId"),
 						eb.ref("ao.marketplace_id").as("marketplaceId"),
-						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")).as("family"),
+						eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)).as("family"),
 						// An aggregate over an arithmetic expression has no builder form:
 						// `eb.fn.sum(eb("item_price", "-", eb.fn.coalesce(...)))` fails with
 						// "Property 'isSelectQueryBuilder' is missing in type 'ExpressionWrapper<…>'".
@@ -271,7 +271,7 @@ export function loadFamilyWindow(
 					.groupBy((eb) => [
 						"ao.merchant_id",
 						"ao.marketplace_id",
-						eb.fn.coalesce("bca.family", ksql.lit("(unmapped)")),
+						eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)),
 					])
 					.compile(),
 		);

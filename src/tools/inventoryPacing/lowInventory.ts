@@ -5,6 +5,21 @@
  * connection is injected. FBM, family/label, and catalog parentAsin lookups are
  * optional: absent relations/columns use a fallback; other database errors fail the Effect.
  *
+ * Two deliberate departures from that reference:
+ * - The FBA and FBM stock queries filter on the store's merchant as well as its
+ *   marketplace, as every sales query here does, so one seller's stock is never
+ *   set against another seller's sales. The reference filters the marketplace only.
+ * - The FBA query counts each FNSKU once per merchant and marketplace, from its
+ *   most recently updated summary. Amazon's inventory summaries are keyed by
+ *   seller SKU and repeat a commingled FNSKU's quantities on every seller SKU
+ *   that points at it, so summing every row would count the same units once per
+ *   SKU. A summary with no FNSKU, or an empty one, is counted on its own, by
+ *   seller SKU.
+ *
+ * An ASIN with no family is labelled `MISSING_FAMILY`, the one label the
+ * canonical readers and the family ad-spend window all use, so its stock and
+ * its spend meet in one family row.
+ *
  * Reads: amzreport_SALES_AND_TRAFFIC__skuByDay, amzreport_ALL_ORDERS,
  * amzspapi_catalog_items_v20220401__catalogitem, amzspapi_fbaInventory_v1__InventorySummary,
  * amzreport_MERCHANT_LISTINGS_ALL, brand_config_amazon_asin/_family.
@@ -14,21 +29,49 @@ import { Effect } from "effect";
 import { isMissingRelationOrColumn } from "../../effectErrors.ts";
 import type postgres from "postgres";
 import { DateTime } from "luxon";
-import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
-import { sql as ksql } from "kysely";
+import { createCanonicalQueryBuilder, MISSING_FAMILY } from "@jsr/databrill__core-pg-kysely/canonical";
+import { type ExpressionBuilder, type Kysely, sql as ksql } from "kysely";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { isoDateParam, runCompiled } from "../../runCompiled.ts";
 import { jsonbInt, jsonbText } from "../../sqlJson.ts";
 import type { ResolvedStore } from "../loadAds/loadAds.ts";
 import type { LowInventoryRow } from "./types.ts";
 
+type CanonicalDb = ReturnType<typeof createCanonicalQueryBuilder> extends Kysely<infer D> ? D : never;
+type FbaSummaryEb = ExpressionBuilder<CanonicalDb, "amzspapi_fbaInventory_v1__InventorySummary">;
+
+/**
+ * The FNSKU of an FBA inventory summary; null when the summary has none. An
+ * empty FNSKU counts as none, as it does for amzfact_fnsku_fbaInventory_latest:
+ * kept as a key, it would put every such summary of the merchant and marketplace
+ * in one group, whatever its ASIN, and keep only one of them. The empty string is
+ * `sql.lit`, not a bind parameter, so this expression and the ORDER BY term match.
+ */
+function fnSkuKey(eb: FbaSummaryEb) {
+	return ksql<string | null>`NULLIF(${jsonbText(eb.ref("doc"), "fnSku")}, ${ksql.lit("")})`;
+}
+
+/**
+ * The sales window, in days, that velocity is read over: a whole number from 1
+ * to 28. The unit queries read 28 days back from yesterday, so a longer window
+ * would divide 28 days of units by more days than they cover.
+ */
+export function effectiveVelocityDays(requested: number): number {
+	return Math.min(28, Math.max(1, Math.trunc(requested)));
+}
+
+/** The seller SKU of an FBA inventory summary that has no FNSKU, else null. */
+function noFnSkuKey(eb: FbaSummaryEb) {
+	return eb.case().when(fnSkuKey(eb), "is", null).then(eb.ref("sellerSku")).end();
+}
+
 export function loadLowInventory(
 	sql: postgres.Sql,
 	stores: ResolvedStore[],
-	velocityDaysRaw: number,
+	velocityDaysRequested: number,
 ): Effect.Effect<LowInventoryRow[], Error> {
 	return Effect.gen(function* () {
-		const velocityDays = Math.min(velocityDaysRaw, 28);
+		const velocityDays = effectiveVelocityDays(velocityDaysRequested);
 		const allRows: LowInventoryRow[] = [];
 		// One builder for the whole invocation: it carries no per-store state (every
 		// per-store value is a bind parameter), and it is where a future
@@ -45,6 +88,7 @@ export function loadLowInventory(
 			const yesterday = DateTime.now().setZone(tz).minus({ days: 1 }).toISODate()!;
 			const day28start = DateTime.fromISO(yesterday).minus({ days: 27 }).toISODate()!;
 			const day7start = DateTime.fromISO(yesterday).minus({ days: 6 }).toISODate()!;
+			const velocityStart = DateTime.fromISO(yesterday).minus({ days: velocityDays - 1 }).toISODate()!;
 
 			const [stMaxRow] = yield* runCompiled(
 				sql,
@@ -61,8 +105,8 @@ export function loadLowInventory(
 			const stEnd = maxSTDate && maxSTDate < yesterdayMinus1 ? maxSTDate : yesterdayMinus1;
 			const aoStart = DateTime.fromISO(stEnd).plus({ days: 1 }).toISODate()!;
 
-			// Q1 — S&T units (7d / 28d)
-			type UnitsAcc = { units1d: number; units7d: number; units28d: number };
+			// Q1 — S&T units (7d / 28d / velocity window)
+			type UnitsAcc = { units1d: number; units7d: number; units28d: number; unitsVelocity: number };
 			const unitsByAsin = new Map<string, UnitsAcc>();
 			if (stEnd >= day28start) {
 				const stRows = yield* runCompiled(
@@ -85,6 +129,15 @@ export function loadLowInventory(
 									eb.fn.sum<number | null>(jsonbInt(eb.ref("sales"), "unitsOrdered")),
 									"integer",
 								).as("units28d"),
+								eb.cast<number | null>(
+									eb.fn.sum<number | null>(
+										eb.case().when("date", ">=", isoDateParam(velocityStart))
+											.then(jsonbInt(eb.ref("sales"), "unitsOrdered"))
+											.else(ksql.lit(0))
+											.end(),
+									),
+									"integer",
+								).as("unitsVelocity"),
 							])
 							.where("marketplaceId", "=", marketplaceId)
 							.where("merchantId", "=", merchantId)
@@ -98,6 +151,7 @@ export function loadLowInventory(
 						units1d: 0,
 						units7d: Number(r.units7d) || 0,
 						units28d: Number(r.units28d) || 0,
+						unitsVelocity: Number(r.unitsVelocity) || 0,
 					});
 				}
 			}
@@ -132,6 +186,15 @@ export function loadLowInventory(
 								eb.cast<number | null>(eb.fn.sum<number | null>("quantity"), "integer").as(
 									"units28d",
 								),
+								eb.cast<number | null>(
+									eb.fn.sum<number | null>(
+										eb.case().when("localdate", ">=", isoDateParam(velocityStart)).then(
+											eb.ref("quantity"),
+										)
+											.else(ksql.lit(0)).end(),
+									),
+									"integer",
+								).as("unitsVelocity"),
 							])
 							.where("marketplace_id", "=", marketplaceId)
 							.where("merchant_id", "=", merchantId)
@@ -151,11 +214,13 @@ export function loadLowInventory(
 						e.units1d += Number(r.units1d) || 0;
 						e.units7d += Number(r.units7d) || 0;
 						e.units28d += Number(r.units28d) || 0;
+						e.unitsVelocity += Number(r.unitsVelocity) || 0;
 					} else {
 						unitsByAsin.set(r.asin, {
 							units1d: Number(r.units1d) || 0,
 							units7d: Number(r.units7d) || 0,
 							units28d: Number(r.units28d) || 0,
+							unitsVelocity: Number(r.unitsVelocity) || 0,
 						});
 					}
 				}
@@ -205,47 +270,59 @@ export function loadLowInventory(
 				}).pipe(Effect.catchIf(isMissingRelationOrColumn, () => Effect.void /* best-effort */));
 			}
 
-			// Q4 — FBA inventory (the runway driver)
+			// Q4 — FBA inventory (the runway driver), one summary per FNSKU, then summed per ASIN.
 			const fbaMap = new Map<string, { inventoryFba: number; inbound: number }>();
 			const fbaRows = yield* runCompiled(
 				sql,
 				() =>
 					db
-						.selectFrom("amzspapi_fbaInventory_v1__InventorySummary")
-						.select((eb) => [
-							jsonbText(eb.ref("doc"), "asin").as("asin"),
-							eb.cast<number | null>(
-								eb.fn.sum<number | null>(
-									eb.fn.coalesce(
-										jsonbInt(eb.ref("doc"), "inventoryDetails", "fulfillableQuantity"),
+						.selectFrom((eb) =>
+							eb
+								.selectFrom("amzspapi_fbaInventory_v1__InventorySummary")
+								// DISTINCT ON keeps the first row of each group in ORDER BY order: each FNSKU's
+								// most recently updated summary. A summary with no FNSKU stays its own group,
+								// keyed by seller SKU; COALESCE would merge it with an FNSKU equal to that
+								// seller SKU, which happens when both are the ASIN. These expressions must
+								// match the leading ORDER BY terms, so keep them literal.
+								.distinctOn([fnSkuKey, noFnSkuKey])
+								.select((eb2) => [
+									jsonbText(eb2.ref("doc"), "asin").as("asin"),
+									eb2.fn.coalesce(
+										jsonbInt(eb2.ref("doc"), "inventoryDetails", "fulfillableQuantity"),
 										ksql.lit(0),
-									),
-								),
-								"integer",
-							).as("inventoryFba"),
+									).as("fulfillable"),
+									eb2.fn.coalesce(
+										jsonbInt(eb2.ref("doc"), "inventoryDetails", "inboundReceivingQuantity"),
+										ksql.lit(0),
+									).as("receiving"),
+									eb2.fn.coalesce(
+										jsonbInt(eb2.ref("doc"), "inventoryDetails", "inboundShippedQuantity"),
+										ksql.lit(0),
+									).as("shipped"),
+								])
+								.where("merchantId", "=", merchantId)
+								.where("marketplaceId", "=", marketplaceId)
+								.where((eb2) =>
+									eb2(jsonbText(eb2.ref("doc"), "asin"), "=", eb2.fn.any(ksql.val(topAsins)))
+								)
+								.orderBy(fnSkuKey)
+								.orderBy(noFnSkuKey)
+								.orderBy("updatedAt", "desc")
+								.orderBy("sellerSku")
+								.as("s")
+						)
+						.select((eb) => [
+							"asin",
+							eb.cast<number | null>(eb.fn.sum<number | null>("fulfillable"), "integer").as(
+								"inventoryFba",
+							),
 							eb.cast<number | null>(
-								eb.fn.sum<number | null>(
-									eb(
-										eb.fn.coalesce(
-											jsonbInt(eb.ref("doc"), "inventoryDetails", "inboundReceivingQuantity"),
-											ksql.lit(0),
-										),
-										"+",
-										eb.fn.coalesce(
-											jsonbInt(eb.ref("doc"), "inventoryDetails", "inboundShippedQuantity"),
-											ksql.lit(0),
-										),
-									),
-								),
+								eb.fn.sum<number | null>(eb("receiving", "+", eb.ref("shipped"))),
 								"integer",
-							).as("inbound"),
+							)
+								.as("inbound"),
 						])
-						.where("marketplaceId", "=", marketplaceId)
-						.where((eb) => eb(jsonbText(eb.ref("doc"), "asin"), "=", eb.fn.any(ksql.val(topAsins))))
-						// `"doc"->>'asin'` is in the SELECT list, the WHERE and the GROUP BY, and
-						// Postgres matches GROUP BY to SELECT by parse-tree equality — jsonbText
-						// keeps the key a literal so all three emit the same text.
-						.groupBy((eb) => jsonbText(eb.ref("doc"), "asin"))
+						.groupBy("asin")
 						.compile(),
 			);
 			for (const r of fbaRows) {
@@ -267,6 +344,8 @@ export function loadLowInventory(
 									.select((eb2) => [
 										jsonbText(eb2.ref("doc"), "asin1").as("asin"),
 										"sellerSku",
+										// The key is (merchantId, marketplaceId, sellerSku) and the WHERE below filters
+										// merchantId and marketplaceId, so each group holds one row and MAX reads it.
 										eb2.cast<number | null>(
 											eb2.fn.max<number | null>(
 												eb2.fn.coalesce(jsonbInt(eb2.ref("doc"), "quantity"), ksql.lit(0)),
@@ -278,6 +357,7 @@ export function loadLowInventory(
 									.where((eb2) =>
 										eb2(jsonbText(eb2.ref("doc"), "fulfillment-channel"), "=", "DEFAULT")
 									)
+									.where("merchantId", "=", merchantId)
 									.where("marketplaceId", "=", marketplaceId)
 									.where((eb2) =>
 										eb2(jsonbText(eb2.ref("doc"), "asin1"), "=", eb2.fn.any(ksql.val(topAsins)))
@@ -333,7 +413,7 @@ export function loadLowInventory(
 						: undefined;
 					const label = (typeof override === "string" ? override : null) ?? r.labelInFamily ??
 						r.labelStandalone ?? r.msku ?? r.asin;
-					familyMap.set(r.asin, { family: r.family ?? "**UNKNOWN**", label });
+					familyMap.set(r.asin, { family: r.family ?? MISSING_FAMILY, label });
 				}
 			}).pipe(Effect.catchIf(isMissingRelationOrColumn, () =>
 				Effect.sync(() => {
@@ -345,13 +425,10 @@ export function loadLowInventory(
 				const units = unitsByAsin.get(asin)!;
 				const fba = fbaMap.get(asin) ?? { inventoryFba: 0, inbound: 0 };
 				const inventoryFbm = fbmMap.get(asin) ?? 0;
-				const fam = familyMap.get(asin) ?? { family: "**UNKNOWN**", label: asin };
+				const fam = familyMap.get(asin) ?? { family: MISSING_FAMILY, label: asin };
 				const pAsin = parentAsinMap.get(asin) ?? null;
 
-				let unitsDaily: number;
-				if (velocityDays <= 1) unitsDaily = units.units1d;
-				else if (velocityDays <= 7) unitsDaily = units.units7d / velocityDays;
-				else unitsDaily = units.units28d / velocityDays;
+				const unitsDaily = units.unitsVelocity / velocityDays;
 
 				const totalInventory = fba.inventoryFba + inventoryFbm;
 				const runway = unitsDaily > 0 ? Math.min(9999, Math.round(totalInventory / unitsDaily)) : null;
@@ -369,6 +446,7 @@ export function loadLowInventory(
 					units1d: units.units1d,
 					units7d: units.units7d,
 					units28d: units.units28d,
+					unitsPerDay: unitsDaily,
 					inventoryFba: fba.inventoryFba,
 					inventoryFbm,
 					inbound: fba.inbound,

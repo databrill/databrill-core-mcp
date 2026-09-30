@@ -18,7 +18,9 @@ const inputSchema = {
 		},
 		when: {
 			type: "string",
-			description: "ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Required.",
+			description: "ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Both ends " +
+				"are inclusive. A bare duration ends at the latest day that every requested store with recent Sales & " +
+				"Traffic data has reported in full (at least half its usual row count). Required.",
 		},
 		groupBy: {
 			type: "string",
@@ -32,7 +34,10 @@ const inputSchema = {
 		},
 		products: {
 			type: "string",
-			description: "Optional filter: comma-separated family names, parent ASINs (auto-expanded), or child ASINs.",
+			description:
+				"Optional filter: comma-separated family names, parent ASINs (auto-expanded), or child ASINs. " +
+				"A family name that maps to no ASIN is dropped without an error; the call fails only when no token " +
+				"resolves to any ASIN.",
 		},
 	},
 	required: ["stores", "when"],
@@ -55,8 +60,11 @@ export const loadTrafficTool = {
 	name: "loadTraffic",
 	description:
 		"Fetch Amazon Sales & Traffic metrics per ASIN (or family) over a time window: sessions, units ordered, " +
-		"ordered-product sales, and conversion rate (units/sessions). Bucketed by DAY/WEEK/MONTH across the requested " +
-		"marketplaces. Reads the client DB (amzreport_SALES_AND_TRAFFIC__skuByDay).",
+		"ordered-product sales, and conversion rate cr (units/sessions, in percent). One row per ASIN or family, " +
+		"marketplace and period; rows from different marketplaces are never summed, and sales is in that " +
+		"marketplace's currency. period is the day for DAY and the last day of the bucket for WEEK (Monday to " +
+		"Sunday) and MONTH. Page views and buy-box percentage are not returned. Reads the client DB " +
+		"(amzreport_SALES_AND_TRAFFIC__skuByDay).",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
 		Effect.flatMap(parseParams(args), (params) => loadTraffic(params, sql)),

@@ -46,7 +46,10 @@ export const executeSqlTool = {
 		`with a ${STATEMENT_TIMEOUT_MS}ms statement timeout; results are capped by row count and by ` +
 		`the ${MAX_RESULT_BYTES}-byte size of the compact JSON response (metadata included), and the ` +
 		"result says explicitly when and why it was truncated. meta.command reports the Postgres " +
-		"command tag of the statement that ran.",
+		"command tag of the statement that ran, or null when a cap stopped the read before the tag arrived. " +
+		"It applies no metric logic: the load* tools, inventoryPacing and salesDropDiagnosis apply " +
+		"report-specific rules (halo attribution, per-marketplace grain, report deduplication) that a query " +
+		"over the same raw report tables does not.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) => executeSql(parseParams(args), sql, hooks),
 };

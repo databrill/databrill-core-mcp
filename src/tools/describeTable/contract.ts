@@ -30,9 +30,9 @@ export const describeTableTool = {
 	feature: SQL_FEATURE,
 	access: "read" as const,
 	description: "Describe one table in this workspace's own schema: column names, data types, nullability and " +
-		"defaults, in ordinal order. Takes a bare table name — there is no schema argument, so it can " +
-		"only describe the caller's own schema. Use listTables to find the name and pass it back " +
-		"unchanged; every name listTables reports is accepted here. " +
+		"defaults, in ordinal order. Table and column comments are not returned. Takes a bare table name — " +
+		"there is no schema argument, so it can only describe the caller's own schema. Use listTables to find the " +
+		"name and pass it back unchanged; every name listTables reports is accepted here. " +
 		`A name outside the supported domain is refused rather than reported missing. ${SUPPORTED_TABLE_NAME_RULE}`,
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql, hooks?: McpToolHooks) =>

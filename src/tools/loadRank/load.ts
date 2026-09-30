@@ -4,18 +4,34 @@
  * (`amazon_sales_rank__{cc}`), so we pick the table(s) for the resolved
  * countries and resolve numeric subcategory codes to names via
  * `amazon_browse_node` keyed on that country's marketplace_code.
+ *
+ * One row per (asin, category, day). The rank table can hold several snapshots
+ * of one ASIN and category on one day; the latest of each day is kept, with its
+ * time as `observedAt`, so every day weighs the same and every rank returned is
+ * one Amazon reported. The day is the marketplace's local calendar day, from its
+ * time zone in `amazonConstants.ts`, and the `when` window selects those days.
+ *
+ * A numeric category key is a browse-node subcategory, named from
+ * `amazon_browse_node` where that table exists; any other key is a top-level
+ * department, which that table does not name, so its key is its `categoryName`.
  */
 
 import { Effect, Either } from "effect";
 import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
+import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { runCompiled } from "../../runCompiled.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
-import type { LoadRankParams, LoadRankResult, RankPoint } from "./types.ts";
+import type { LoadRankParams, LoadRankResult, RankCategoryKind, RankPoint } from "./types.ts";
 
 function fail(msg: string): Either.Either<never, Error> {
 	return Either.left(new Error(msg));
+}
+
+/** A numeric browse-node key is a subcategory; any other key is a top-level department. */
+function categoryKindOf(category: string): RankCategoryKind {
+	return /^\d+$/.test(category) ? "subcategory" : "department";
 }
 
 export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effect<LoadRankResult, Error> {
@@ -25,6 +41,8 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 
 		const stores = yield* resolveStores(params.stores, sql);
 		const countries = [...new Set(stores.map((s) => s.countryCode))]; // uppercase, e.g. DE
+		// Every store of a country is in that country's marketplace.
+		const marketplaceIdByCountry = new Map(stores.map((s) => [s.countryCode, s.marketplaceId]));
 		const range = yield* resolveWhen(params.when, sql);
 
 		let asins: string[] | null = null;
@@ -70,22 +88,42 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 				missing.push(country);
 				continue;
 			}
+			const marketplaceId = marketplaceIdByCountry.get(country) ?? country;
+			const tz = marketplaceIdToMarketplaceInfo[marketplaceId]?.timeZone;
+			if (tz === undefined) {
+				return yield* fail(`No time zone is known for marketplace ${marketplaceId}`);
+			}
 			present.push(country);
 
+			// The day is computed once in the subquery, so DISTINCT ON and ORDER BY name a
+			// column rather than repeating an expression with its own time-zone parameter,
+			// which would not match. The range predicate stays on the raw "time" column so
+			// its index and partition pruning apply: local midnight of the first day up to
+			// local midnight after the last, as UTC instants.
 			const asinFilter = asins ? sql`AND asin IN ${sql(asins)}` : sql``;
 			const rows = yield* tryPromiseOrOperationError(() =>
-				sql<Array<{ asin: string; category: string; rank: number; date: string }>>`
-			SELECT asin, category, rank, time::date::text AS date
-			FROM ${sql(table)}
-			WHERE time::date >= ${range.dateFirst}::date
-				AND time::date <= ${range.dateLast}::date
-				${asinFilter}
-			ORDER BY asin, time
+				sql<Array<{ asin: string; category: string; rank: number; date: string; observedAt: string }>>`
+			SELECT DISTINCT ON (asin, category, day)
+				asin, category, rank, day::text AS date, observed_at AS "observedAt"
+			FROM (
+				SELECT asin, category, rank, "time",
+					("time" AT TIME ZONE ${tz})::date AS day,
+					to_char("time" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS observed_at
+				FROM ${sql(table)}
+				WHERE "time" >= (${range.dateFirst}::date)::timestamp AT TIME ZONE ${tz}
+					AND "time" < (${range.dateLast}::date + 1)::timestamp AT TIME ZONE ${tz}
+					${asinFilter}
+			) s
+			ORDER BY asin, category, day, "time" DESC
 		`
 			).pipe(Effect.uninterruptible);
 
 			// Resolve numeric subcategory codes → display names for this marketplace.
-			const numeric = [...new Set(rows.map((r) => String(r.category)).filter((c) => /^\d+$/.test(c)))];
+			const numeric = [
+				...new Set(
+					rows.map((r) => String(r.category)).filter((c) => categoryKindOf(c) === "subcategory"),
+				),
+			];
 			const nameMap = new Map<string, string>();
 			if (hasBrowseNode && numeric.length > 0) {
 				// The digit STRINGS are bound, not `Number(...)`: `amazon_browse_node.id`
@@ -108,13 +146,18 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 
 			for (const r of rows) {
 				const category = String(r.category);
+				const categoryKind = categoryKindOf(category);
 				data.push({
 					country,
 					asin: r.asin,
 					date: r.date,
+					observedAt: r.observedAt,
 					rank: Number(r.rank),
 					category,
-					categoryName: nameMap.get(category) ?? `subcategory ${category}`,
+					categoryKind,
+					categoryName: categoryKind === "subcategory"
+						? nameMap.get(category) ?? `subcategory ${category}`
+						: category,
 				});
 			}
 		}

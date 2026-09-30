@@ -17,10 +17,18 @@ const inputSchema = {
 			description:
 				"Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
 		},
-		when: { type: "string", description: "ISO 8601 interval or duration. Required." },
+		when: {
+			type: "string",
+			description: "ISO 8601 interval or duration. Both ends are inclusive. A bare duration ends at the latest " +
+				"date with advertising data, not the latest rank date; pass an explicit interval to choose the end. " +
+				"Required.",
+		},
 		products: {
 			type: "string",
-			description: "Optional (recommended) filter: family names, parent ASINs (auto-expanded), or child ASINs.",
+			description: "Optional filter: family names, parent ASINs (auto-expanded), or child ASINs. Without it, " +
+				"every ranked ASIN in each requested marketplace is returned, one row per ASIN, category and day, " +
+				"with no row cap. A family name that maps to no ASIN is dropped without an error; the call fails " +
+				"only when no token resolves to any ASIN.",
 		},
 	},
 	required: ["stores", "when"],
@@ -40,9 +48,14 @@ function parseParams(args: Record<string, unknown>): Either.Either<LoadRankParam
 export const loadRankTool = {
 	name: "loadRank",
 	description:
-		"Fetch Best Sellers Rank (BSR) trend per ASIN over a window, with subcategory names resolved. Picks the " +
-		"per-marketplace rank table for each requested country; countries without a rank table are reported in " +
-		"meta.missingRankTables. Reads the client DB (amazon_sales_rank__{cc}, amazon_browse_node).",
+		"Fetch Best Sellers Rank (BSR) per ASIN, category and day over a window: one row per ASIN, category and " +
+		"marketplace-local calendar day, holding the latest rank snapshot of that day, with observedAt giving that " +
+		"snapshot's time in UTC. An ASIN is ranked in several categories at once: categoryKind is subcategory for a " +
+		"numeric browse-node category, whose categoryName is resolved from amazon_browse_node where that table " +
+		"exists, and department for a top-level category, whose categoryName is its key. Compare ranks only within " +
+		"one category. Picks the per-marketplace rank table for each requested country; countries without a rank " +
+		"table are reported in meta.missingRankTables. Reads the client DB (amazon_sales_rank__{cc}, " +
+		"amazon_browse_node).",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
 		Effect.flatMap(parseParams(args), (params) => loadRank(params, sql)),

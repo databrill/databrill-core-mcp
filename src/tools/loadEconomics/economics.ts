@@ -7,20 +7,28 @@
  * zero and `source` is "missing".
  */
 
-export interface PerAsinEconomics {
-	asin: string;
-	price: number;
-	cogs: number;
-	fbaPickPack: number;
-	referralPct: number; // e.g. 0.15, a common Amazon referral fee rate
-	storage: number;
-	source: "sheet" | "default" | "missing";
-}
+import { Schema } from "effect";
 
-export interface EconomicsInput {
-	perAsin: Record<string, PerAsinEconomics>;
-	familyDefault?: PerAsinEconomics;
-}
+/** One ASIN's cost inputs as the caller passes them. A missing field counts as 0, and referralPct as 0.15. */
+const CostInputSchema = Schema.Struct({
+	price: Schema.optional(Schema.Number),
+	cogs: Schema.optional(Schema.Number),
+	fbaPickPack: Schema.optional(Schema.Number),
+	referralPct: Schema.optional(Schema.Number), // a fraction: 0.15 is a common Amazon referral fee rate
+	storage: Schema.optional(Schema.Number),
+});
+
+/** `perAsin` may be omitted, as when every ASIN takes `familyDefault`. */
+export const EconomicsInputSchema = Schema.Struct({
+	perAsin: Schema.optionalWith(Schema.Record({ key: Schema.String, value: CostInputSchema }), {
+		default: () => ({}),
+	}),
+	familyDefault: Schema.optional(CostInputSchema),
+});
+
+export type EconomicsInput = typeof EconomicsInputSchema.Type;
+
+type EconomicsSource = "sheet" | "default" | "missing";
 
 /** Ad totals per advertised ASIN — the rollup `computeEconomics` consumes. */
 export interface AdvertisedAsinRollup {
@@ -48,7 +56,7 @@ export interface PerSaleEconomics {
 	netPerAdSaleNoHalo: number;
 	haloProfitPerAdSale: number;
 	netPerAdSaleWithHalo: number;
-	source: PerAsinEconomics["source"];
+	source: EconomicsSource;
 }
 
 function round2(n: number): number {
@@ -80,7 +88,7 @@ export function computeEconomics(
 
 	return advertisedAsins.map((a) => {
 		const e = economics.perAsin[a.asin] ?? economics.familyDefault ?? null;
-		const source: PerAsinEconomics["source"] = economics.perAsin[a.asin] ? "sheet" : e ? "default" : "missing";
+		const source: EconomicsSource = economics.perAsin[a.asin] ? "sheet" : e ? "default" : "missing";
 		const price = e?.price ?? 0;
 		const cogs = e?.cogs ?? 0;
 		const fbaPickPack = e?.fbaPickPack ?? 0;

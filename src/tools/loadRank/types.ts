@@ -4,12 +4,17 @@
  * per-marketplace `amazon_sales_rank__{cc}` table(s) in scope.
  */
 
+/** A numeric browse-node key is a subcategory; any other key is a top-level department. */
+export type RankCategoryKind = "subcategory" | "department";
+
 export interface RankPoint {
 	country: string;
 	asin: string;
-	date: string; // YYYY-MM-DD
+	date: string; // YYYY-MM-DD, the marketplace's local calendar day
+	observedAt: string; // ISO 8601 UTC time of the snapshot kept for that day
 	rank: number;
 	category: string; // raw code (numeric id or label)
+	categoryKind: RankCategoryKind;
 	categoryName: string;
 }
 

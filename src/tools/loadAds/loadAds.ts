@@ -121,7 +121,7 @@ export interface LoadAdsResult {
 		dateFirst: string;
 		dateLast: string;
 		stores: string[];
-		dateDataLatest: string;
+		dateDataLatest: string | null; // latest ad date for the selected stores, whatever the window; null when they have none
 		rowCount: number;
 		groupBy: GroupByDim[];
 		timeUnit: TimeUnit | null;
@@ -332,7 +332,7 @@ function extractDate(node: { readonly date: string } | { readonly datetime: stri
 export function parseWhenRange(whenStr: string): Either.Either<ParsedWhenRange, Error> {
 	return Either.gen(function* () {
 		const ast = yield* parseWhenAst(whenStr).pipe(
-			Either.mapLeft((cause) => Object.assign(new LoadAdsError(`Invalid --when: ${cause.message}`), { cause })),
+			Either.mapLeft((cause) => Object.assign(new LoadAdsError(`Invalid when: ${cause.message}`), { cause })),
 		);
 
 		switch (ast._tag) {
@@ -364,7 +364,7 @@ export function parseWhenRange(whenStr: string): Either.Either<ParsedWhenRange, 
 				return { kind: "trailing", duration: ast };
 
 			default:
-				return yield* fail(`Unsupported --when format: ${ast._tag}`);
+				return yield* fail(`Unsupported when format: ${ast._tag}`);
 		}
 	});
 }
@@ -487,7 +487,7 @@ function probeFamilyTable(db: CanonicalDb, sql: postgres.Sql): Effect.Effect<boo
 function parseFilter(filterStr: string): Either.Either<FilterExpr, Error> {
 	return Either.gen(function* () {
 		const parts = filterStr.split(":");
-		if (parts.length < 3) return yield* fail(`Invalid --filter format: '${filterStr}'. Expected 'field:op:value'`);
+		if (parts.length < 3) return yield* fail(`Invalid filter format: '${filterStr}'. Expected 'field:op:value'`);
 		const field = parts[0];
 		const op = parts[1];
 		const value = parts.slice(2).join(":");
@@ -1316,6 +1316,9 @@ function mergeResults(
 		for (const col of keyCols) {
 			outRow[col] = baseRow[col];
 		}
+		// True exactly when the key came from the halo-in query alone: such a row has
+		// no advertised or halo-out metrics. A top-level field in nested output too.
+		outRow["haloInOnly"] = !isQ1;
 
 		// Advertised metrics (from q1)
 		const impressions = isQ1 ? Number(q1Row["impressions"] ?? 0) : 0;
@@ -1450,9 +1453,9 @@ export function loadAds(
 ): Effect.Effect<LoadAdsResult, Error> {
 	return Effect.gen(function* () {
 		// Validate required fields
-		if (!params.stores) return yield* fail("--stores is required");
-		if (!params.when) return yield* fail("--when is required");
-		if (!params.groupBy) return yield* fail("--groupBy is required");
+		if (!params.stores) return yield* fail("stores is required");
+		if (!params.when) return yield* fail("when is required");
+		if (!params.groupBy) return yield* fail("groupBy is required");
 
 		// One builder for the whole invocation, built before anything is assembled: it
 		// is where a future `.withSchema(workspaceSchema)` would attach.
@@ -1465,7 +1468,7 @@ export function loadAds(
 		const groupByDims = params.groupBy.split(",").map((s) => s.trim()) as GroupByDim[];
 		for (const dim of groupByDims) {
 			if (!VALID_GROUP_BY.includes(dim)) {
-				return yield* fail(`Unknown --groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`);
+				return yield* fail(`Unknown groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`);
 			}
 		}
 
@@ -1474,7 +1477,7 @@ export function loadAds(
 		if (params.timeUnit) {
 			const tu = params.timeUnit.toUpperCase() as TimeUnit;
 			if (!VALID_TIME_UNITS.includes(tu)) {
-				return yield* fail(`Unknown --timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`);
+				return yield* fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`);
 			}
 			timeUnit = tu;
 		}
@@ -1496,7 +1499,7 @@ export function loadAds(
 		if (params.products) {
 			productAsins = yield* resolveProducts(params.products, sql);
 			if (productAsins.length === 0) {
-				return yield* fail("--products resolved to zero ASINs");
+				return yield* fail("products resolved to zero ASINs");
 			}
 		}
 
@@ -1516,7 +1519,7 @@ export function loadAds(
 					)
 					.compile(),
 		);
-		const dateDataLatest = latestRow[0]?.latest ?? range.dateLast;
+		const dateDataLatest = latestRow[0]?.latest ?? null;
 
 		// Only the family dimension reads the family table, so only then is it probed.
 		const familyTable = groupByDims.includes("family") ? (yield* probeFamilyTable(db, sql)) : false;

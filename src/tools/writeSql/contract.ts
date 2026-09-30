@@ -28,7 +28,9 @@ export const writeSqlTool = {
 	// `sqlWrite`, not `sql`: this tool is announced independently of the read tools.
 	feature: SQL_WRITE_FEATURE,
 	access: "write" as const,
-	description: "Run one write statement against this workspace's configuration tables. The statement commits " +
+	description: "Run one write statement against this workspace's brand configuration tables (the brand_config_* " +
+		"tables: product families, ASIN-to-family and SKU mapping, the ontology, and effective-dated attributes). " +
+		"The statement commits " +
 		"only if the workspace's write role has been granted on the target table; pipeline data tables " +
 		`are refused by Postgres. Runs with a ${STATEMENT_TIMEOUT_MS}ms statement timeout and returns the ` +
 		"command tag, how many rows the statement affected, and its RETURNING rows — capped at " +

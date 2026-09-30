@@ -18,7 +18,11 @@ const inputSchema = {
 			description:
 				"Comma-separated stores: country code, region, marketplaceId, '*', or '{merchantId}-{scope}'. Required.",
 		},
-		velocityDays: { type: "integer", description: "Window for units/day. Default 7." },
+		velocityDays: {
+			type: "integer",
+			description: "Days of sales, ending yesterday, that units/day is averaged over. 1 to 28; values outside " +
+				"are clamped, and meta.config reports the value used. Default 7.",
+		},
 		spendWindowDays: { type: "integer", description: "Window for ad spend/day. Default 7." },
 		criticalDays: { type: "integer", description: "Runway ≤ this → pause. Default 7." },
 		lowDays: { type: "integer", description: "Runway ≤ this → throttle. Default 21." },
@@ -51,7 +55,11 @@ export const inventoryPacingTool = {
 		"Recommend how advertising should respond to inventory: per family, join the runway (days of stock at current " +
 		"velocity) with current ad spend and return a pacing action — pause / throttle / hold / ramp — with a rationale. " +
 		"Critical runway with active spend → pause; inbound restock softens to throttle; overstock → ramp to sell down. " +
-		"Flags a worst-variant caveat when a child ASIN is critical under a healthy family. Reads the client DB.",
+		"Flags a worst-variant caveat when a child ASIN is critical under a healthy family. Reads the client DB. " +
+		"FBA stock comes from Amazon's per-marketplace inventory summaries. Where one stock pool serves several " +
+		"marketplaces, as Amazon's Pan-European FBA does, Amazon reports the whole pool on each of them, so each such " +
+		"marketplace's row sets the shared stock against that marketplace's sales alone and its runway reads longer " +
+		"than the stock supports. Never add stock across those marketplaces.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
 		Effect.flatMap(parseParams(args), (params) => loadInventoryPacing(params, sql)),

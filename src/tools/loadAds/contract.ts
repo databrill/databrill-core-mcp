@@ -20,7 +20,9 @@ const inputSchema = {
 		},
 		when: {
 			type: "string",
-			description: "ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Required.",
+			description: "ISO 8601 interval or duration: '2026-04-13/2026-04-19', 'P7D', 'P4W/2026-04-19'. Both ends " +
+				"are inclusive. A bare duration ends at the latest date with advertising data in the database. " +
+				"Required.",
 		},
 		groupBy: {
 			type: "string",
@@ -31,15 +33,23 @@ const inputSchema = {
 		timeUnit: {
 			type: "string",
 			enum: [...VALID_TIME_UNITS],
-			description: "Optional temporal aggregation.",
+			description: "Optional time bucket: DAY, WEEK (Monday to Sunday), MONTH, QUARTER or YEAR. Each row then " +
+				"carries its bucket's calendar dateFirst and dateLast, so the first and last buckets can name dates " +
+				"outside the window when it does not align to the bucket. Omit for one row per group over the whole " +
+				"window.",
 		},
 		products: {
 			type: "string",
-			description: "Optional comma-separated filter: family names, parent ASINs (auto-expanded), or child ASINs.",
+			description:
+				"Optional comma-separated filter: family names, parent ASINs (auto-expanded), or child ASINs. " +
+				"A family name that maps to no ASIN is dropped without an error; the call fails only when no token " +
+				"resolves to any ASIN.",
 		},
 		filter: {
 			type: "string",
-			description: "Optional filter expression, e.g. 'campaignName:=:value'.",
+			description: "Optional exact campaign-name filter, written 'campaignName:=:<name>'. campaignName is the " +
+				"only field and '=' the only operator; the name must match exactly, including letter case, and may " +
+				"itself contain ':'. Any other field or operator is rejected.",
 		},
 		derived: {
 			type: "boolean",
@@ -76,7 +86,13 @@ export const loadAdsTool = {
 		"Fetch Amazon advertising performance metrics aggregated by configurable dimensions (asin, family, parentAsin, " +
 		"campaign, adType, placement, target, adgroup, country, store, merchant, marketplaceId), optionally over a time " +
 		"unit. Returns impressions, clicks, addToCart, purchases, units, spend, revenue, and halo (cross-product) metrics; " +
-		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; Amazon's ad reports lag 1-2 days.",
+		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; Amazon's ad reports lag 1-2 days. " +
+		"Rows built only from halo-in metrics (this product's sales that Amazon credits to ads for other products) " +
+		"carry haloInOnly: true and zero advertised and halo-out metrics. Such rows appear, with or without a products " +
+		"filter, for a product with no ads of its own in the row's window or time bucket, and groupBy placement reports " +
+		"all halo-in under a null placement because Amazon's halo-in report has no placement. haloInOnly is a top-level " +
+		"field in nested output too. meta.dateDataLatest is the latest date with ad data for the selected stores, " +
+		"whatever the window, or null when they have none.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
 		Effect.flatMap(parseParams(args), (params) => loadAds(params, sql)),

@@ -23,8 +23,8 @@
  * `describeTable` refuse a table that plainly exists, which is a worse answer than its
  * columns.
  *
- * The rule 2 match is a SUBSTRING, so a table a workspace created for itself through
- * `writeSql` and named `kysely_migration_export` is hidden from a listing too. That is
+ * The rule 2 match is a SUBSTRING, so a table a workspace created for itself and
+ * named `kysely_migration_export` is hidden from a listing too. That is
  * accepted, not overlooked, and it is not the failure the allowlist paragraph below
  * rejects: hiding removes a name from ONE listing, while `describeTable` and `executeSql`
  * both still reach it by name. Should a real customer table ever collide, the remedy is to
@@ -39,8 +39,8 @@
  * would show more tables in a listing; it would not reach another tenant.
  *
  * Rule 1 is deliberately not an `[A-Za-z0-9_]+` allowlist, though every table Databrill
- * itself creates would pass one: `writeSql` lets a workspace create tables of its own, and
- * an allowlist would hide a customer's `my report` from both tools forever. Widening this
+ * itself creates would pass one: a workspace's schema can hold tables Databrill did not create,
+ * and an allowlist would hide a customer's `my report` from both tools forever. Widening this
  * rule later adds rows to a listing; narrowing it removes them.
  */
 

@@ -2,8 +2,8 @@
  * loadEconomics — per-advertised-ASIN profitability. Fetches the ad rollup via
  * `loadAds` (groupBy=asin, with halo) and applies `computeEconomics`. The
  * cost inputs (price/COGS/fees) are NOT in the client DB, so the caller supplies
- * them in `economics`; without them, margins are zero and source="missing"
- * (the rollup — spend, ad cost per sale, halo revenue — still comes back).
+ * them in `economics`; without them, every economics figure (ad cost per sale
+ * included) is zero with source="missing", and only the rollup carries data.
  */
 
 import { Effect, Either } from "effect";
