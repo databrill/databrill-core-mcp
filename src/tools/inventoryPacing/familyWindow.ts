@@ -1,10 +1,11 @@
 /**
  * Per-family ad spend and sales over a window.
  *
- * Rows with a real advertised ASIN carry Amazon's definitive attribution. The
- * signed reconciliation residual of each Sponsored Brands ad is emitted
- * separately and attributed to the first creative ASIN's family with an
- * explicit source.
+ * Rows with a real advertised ASIN carry Amazon's definitive attribution. A
+ * Sponsored Brands aggregate row (no ASIN) counts only when its key has no
+ * per-ASIN row (`kyselySbAggregateHasPerAsinTwin.ts`); those rows are emitted separately,
+ * per ad, and attributed to the first creative ASIN's family with an explicit
+ * source.
  */
 
 import { createCanonicalQueryBuilder, MISSING_FAMILY } from "@jsr/databrill__core-pg-kysely/canonical";
@@ -14,10 +15,11 @@ import type postgres from "postgres";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { groupByWith } from "../../groupByWith.ts";
 import { isoDateParam, runCompiled } from "../../runCompiled.ts";
+import { kyselySbAggregateHasPerAsinTwin_SAP, SPONSORED_BRANDS } from "../../kyselySbAggregateHasPerAsinTwin.ts";
 import { jsonbText } from "../../sqlJson.ts";
 import { summarizeAdMetrics } from "../../summarizeAdMetrics.ts";
 
-export const SB_RESIDUAL_FIRST_ASIN = "SB_RESIDUAL_FIRST_ASIN";
+export const SB_AGGREGATE_FIRST_ASIN = "SB_AGGREGATE_FIRST_ASIN";
 
 export interface FamilyAgg {
 	readonly merchantId: string;
@@ -107,11 +109,13 @@ export function loadFamilyWindow(
 								"ad.marketplaceId",
 								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)),
 							]))
+					// The Sponsored Brands aggregate rows that count, per ad: those whose key
+					// has no per-ASIN row. Every per-ASIN row is already in `certain`.
 					.with("sb_by_ad", (qb) =>
 						qb
 							.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as ad")
 							.select((eb) => {
-								function residual(
+								function total(
 									column:
 										| "impressions"
 										| "clicks"
@@ -120,44 +124,25 @@ export function loadFamilyWindow(
 										| "totalCost"
 										| "sales",
 								) {
-									return eb.cast<string>(
-										eb(
-											eb.fn.coalesce(
-												eb.fn.sum<string>(`ad.${column}`).filterWhere(
-													"ad.advertisedProductId",
-													"=",
-													"",
-												),
-												ksql.lit(0),
-											),
-											"-",
-											eb.fn.coalesce(
-												eb.fn.sum<string>(`ad.${column}`).filterWhere(
-													"ad.advertisedProductId",
-													"<>",
-													"",
-												),
-												ksql.lit(0),
-											),
-										),
-										"numeric",
-									);
+									return eb.cast<string>(eb.fn.sum<string>(`ad.${column}`), "numeric");
 								}
 								return [
 									"ad.merchantId",
 									"ad.marketplaceId",
 									"ad.adId",
-									residual("impressions").as("residual_impressions"),
-									residual("clicks").as("residual_clicks"),
-									residual("purchases").as("residual_orders"),
-									residual("unitsSold").as("residual_units"),
-									residual("totalCost").as("residual_spend"),
-									residual("sales").as("residual_sales"),
+									total("impressions").as("sb_impressions"),
+									total("clicks").as("sb_clicks"),
+									total("purchases").as("sb_orders"),
+									total("unitsSold").as("sb_units"),
+									total("totalCost").as("sb_spend"),
+									total("sales").as("sb_sales"),
 								];
 							})
 							.where((eb) => eb("ad.merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
 							.where("ad.date", ">=", isoDateParam(since))
-							.where("ad.adProduct", "=", "Sponsored Brands")
+							.where("ad.adProduct", "=", SPONSORED_BRANDS)
+							.where("ad.advertisedProductId", "=", "")
+							.where((eb) => eb.not(eb.exists(kyselySbAggregateHasPerAsinTwin_SAP(db, "ad"))))
 							.groupBy(["ad.merchantId", "ad.marketplaceId", "ad.adId"]))
 					.with("guessed", (qb) =>
 						qb
@@ -172,27 +157,27 @@ export function loadFamilyWindow(
 								"sb.merchantId",
 								"sb.marketplaceId",
 								eb.fn.coalesce("bca.family", ksql.lit(MISSING_FAMILY)).as("family"),
-								eb.cast<string>(eb.val(SB_RESIDUAL_FIRST_ASIN), "text").as("source"),
+								eb.cast<string>(eb.val(SB_AGGREGATE_FIRST_ASIN), "text").as("source"),
 								eb.cast<string | null>(
-									eb.fn.sum<string | null>("sb.residual_impressions"),
+									eb.fn.sum<string | null>("sb.sb_impressions"),
 									"numeric",
 								)
 									.as("adImpressions"),
-								eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_clicks"), "numeric")
+								eb.cast<string | null>(eb.fn.sum<string | null>("sb.sb_clicks"), "numeric")
 									.as(
 										"adClicks",
 									),
-								eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_orders"), "numeric")
+								eb.cast<string | null>(eb.fn.sum<string | null>("sb.sb_orders"), "numeric")
 									.as(
 										"adOrders",
 									),
-								eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_units"), "numeric").as(
+								eb.cast<string | null>(eb.fn.sum<string | null>("sb.sb_units"), "numeric").as(
 									"adUnits",
 								),
-								eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_spend"), "numeric").as(
+								eb.cast<string | null>(eb.fn.sum<string | null>("sb.sb_spend"), "numeric").as(
 									"adSpend",
 								),
-								eb.cast<string | null>(eb.fn.sum<string | null>("sb.residual_sales"), "numeric").as(
+								eb.cast<string | null>(eb.fn.sum<string | null>("sb.sb_sales"), "numeric").as(
 									"adSales",
 								),
 							])
@@ -201,12 +186,12 @@ export function loadFamilyWindow(
 									// The CTE columns are `numeric` (typed `string`), so `sql.lit(0)` — a
 									// `RawBuilder<number>` — is rejected. `sql.raw` emits the bare `0` the
 									// original has; it receives a source-code literal, never caller data.
-									eb("sb.residual_impressions", "<>", ksql.raw<string>("0")),
-									eb("sb.residual_clicks", "<>", ksql.raw<string>("0")),
-									eb("sb.residual_orders", "<>", ksql.raw<string>("0")),
-									eb("sb.residual_units", "<>", ksql.raw<string>("0")),
-									eb("sb.residual_spend", "<>", ksql.raw<string>("0")),
-									eb("sb.residual_sales", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_impressions", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_clicks", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_orders", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_units", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_spend", "<>", ksql.raw<string>("0")),
+									eb("sb.sb_sales", "<>", ksql.raw<string>("0")),
 								])
 							)
 							.groupBy((eb) => [

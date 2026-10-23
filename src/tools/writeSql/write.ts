@@ -27,7 +27,7 @@
  * been granted — the config-table prefix and nothing else — and by nothing in
  * this file. No code here inspects the statement to decide whether it may run.
  *
- * See `../executeSql/execute.ts` for why the `mcp-local/CLAUDE.md`
+ * See `../executeSql/execute.ts` for why the `mcp-local/AGENTS.md`
  * feature-origination rule does not apply to this tool family.
  */
 

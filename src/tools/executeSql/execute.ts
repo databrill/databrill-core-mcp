@@ -3,7 +3,7 @@
  * workspace's own database and return the rows with truncation metadata.
  *
  * Provenance: this tool has NO ported reference implementation, and the
- * feature-origination rule in `mcp-local/CLAUDE.md` (tool logic is ported from a
+ * feature-origination rule in `mcp-local/AGENTS.md` (tool logic is ported from a
  * reference in `services/` or the agency repo, with parity as the proof) does not
  * apply to it. That rule exists to protect METRIC logic, where the only proof the
  * math is right is agreement with the reference. There is no metric logic here:

@@ -21,7 +21,7 @@
  * describe a table the caller did not name, and would leave the domain's
  * no-edge-whitespace clause unable to fire here at all.
  *
- * See `../executeSql/execute.ts` for why the `mcp-local/CLAUDE.md`
+ * See `../executeSql/execute.ts` for why the `mcp-local/AGENTS.md`
  * feature-origination rule does not apply to this tool family.
  */
 

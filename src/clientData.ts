@@ -22,6 +22,7 @@ import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/cano
 import { sql as ksql } from "kysely";
 import { countryCodeToMarketplaceInfo, marketplaceIdToMarketplaceInfo } from "./amazonConstants.ts";
 import { isoDateParam, runCompiled } from "./runCompiled.ts";
+import { kyselySbAggregateHasPerAsinTwin_SAP, SPONSORED_BRANDS } from "./kyselySbAggregateHasPerAsinTwin.ts";
 import { jsonbInt } from "./sqlJson.ts";
 
 // ─── identity (from the client DB) ──────────────────────────────────
@@ -234,37 +235,32 @@ function loadDailyAdBySite(sql: Sql, merchantIds: string[], since: string): Effe
 			sql,
 			() =>
 				db
-					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay")
+					.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as r")
 					.select((eb) => [
 						// Cast to text in the query — see loadDailySalesBySite above.
-						eb.cast<string>(eb.ref("date"), "text").as("date"),
-						"merchantId",
-						"marketplaceId",
-						eb.cast<string | null>(eb.fn.sum<string | null>("totalCost"), "numeric").as("spend"),
-						eb.cast<number | null>(eb.fn.sum<string | null>("clicks"), "integer").as("clicks"),
-						eb.cast<number | null>(eb.fn.sum<string | null>("impressions"), "integer").as(
+						eb.cast<string>(eb.ref("r.date"), "text").as("date"),
+						"r.merchantId",
+						"r.marketplaceId",
+						eb.cast<string | null>(eb.fn.sum<string | null>("r.totalCost"), "numeric").as("spend"),
+						eb.cast<number | null>(eb.fn.sum<string | null>("r.clicks"), "integer").as("clicks"),
+						eb.cast<number | null>(eb.fn.sum<string | null>("r.impressions"), "integer").as(
 							"impressions",
 						),
-						eb.cast<number | null>(eb.fn.sum<string | null>("purchases"), "integer").as("orders"),
-						eb.cast<string | null>(eb.fn.sum<string | null>("sales"), "numeric").as("adSales"),
+						eb.cast<number | null>(eb.fn.sum<string | null>("r.purchases"), "integer").as("orders"),
+						eb.cast<string | null>(eb.fn.sum<string | null>("r.sales"), "numeric").as("adSales"),
 					])
-					.where((eb) => eb("merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
-					.where("date", ">=", isoDateParam(since))
-					// Sponsored Brands stores each cost twice: an aggregate row
-					// (advertisedProductId = '') and per-ASIN breakdown rows. Keep the
-					// aggregate row only so SB is not double-counted; SP/SD are unaffected.
-					// This query groups by date/merchant/marketplace only (store/total grain,
-					// see loadStoreSeries/mergeDaily below — no ASIN dimension), so the
-					// level-aware refinement in loadAds.ts's sbDoubleCountFilter (which keeps
-					// per-ASIN SB rows instead at ASIN/product grain) does not apply here: the
-					// aggregate-only filter is already the correct behavior for every caller
-					// of this function.
+					.where((eb) => eb("r.merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
+					.where("r.date", ">=", isoDateParam(since))
+					// Each Sponsored Brands key once: its per-ASIN rows, else its aggregate
+					// row (`kyselySbAggregateHasPerAsinTwin.ts`). SP and SD have no aggregate row.
 					.where((eb) =>
-						eb.not(
-							eb.and([eb("adProduct", "=", "Sponsored Brands"), eb("advertisedProductId", "<>", "")]),
-						)
+						eb.not(eb.and([
+							eb("r.adProduct", "=", SPONSORED_BRANDS),
+							eb("r.advertisedProductId", "=", ""),
+							eb.exists(kyselySbAggregateHasPerAsinTwin_SAP(db, "r")),
+						]))
 					)
-					.groupBy(["date", "merchantId", "marketplaceId"])
+					.groupBy(["r.date", "r.merchantId", "r.marketplaceId"])
 					.compile(),
 		);
 		const out: DailyAd[] = [];

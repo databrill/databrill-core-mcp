@@ -22,7 +22,7 @@
  * in TypeScript over the rows the query returned, not in SQL: there is nothing to gain
  * from pushing them into the query, and the rules stay readable where they live.
  *
- * See `../executeSql/execute.ts` for why the `mcp-local/CLAUDE.md`
+ * See `../executeSql/execute.ts` for why the `mcp-local/AGENTS.md`
  * feature-origination rule does not apply to this tool family.
  */
 

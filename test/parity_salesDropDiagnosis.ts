@@ -9,6 +9,9 @@
  *     (connects via pg_service `w{wsid}`).
  *   • port:      this repo's `load()` in-process, POSTGRES_URL derived from the
  *     agency repo's pg_service.conf + .env.local password (same physical DB).
+ *     It logs in as that entry's agency-side user, not a provisioned workspace
+ *     role, which is the only reason it copies the entry's search_path into the
+ *     URL. See the comment in `derivePostgresUrl` before reusing any of it.
  * Both run with `--all-stores --skip-inventory`, so the store set and inventory
  * handling are identical and only the sales-decomposition math is compared.
  *
@@ -53,10 +56,21 @@ function derivePostgresUrl(): string {
 	if (!pwLine) fail(`${envVar} not found in ${AGENCY_REPO}/.env.local`);
 	const password = pwLine.slice(envVar.length + 1).replace(/^"|"$/g, "");
 
-	// Mirror what getDb (pg_service) puts on the connection: sslmode + the startup
-	// `options` (e.g. --search_path=w… for schema-in-shared-instance clients).
-	// Without the search_path the connection resolves to the wrong
-	// schema and every table read fails.
+	// Mirror what the agency repo's pg_service entry puts on the connection:
+	// sslmode, plus its startup `options`, which for schema-in-shared-instance
+	// clients carry `-c search_path=w…`. This script logs in as that entry's
+	// `user`, an agency-side login that predates Databrill's role provisioning
+	// and has no role-level search_path, so without the startup option its
+	// table reads resolve against the wrong schema and fail.
+	//
+	// Do not copy this: it is an exemption for that one login. A
+	// Databrill-provisioned role (`w{wsid}_ro`, `w{wsid}_mcp_ro`, …) is created
+	// with `ALTER ROLE … SET search_path = "w{wsid}"`, which the server applies
+	// at session start and which therefore survives a transaction-mode pooler; a
+	// startup `options` parameter is not forwarded by every pooler. A connection
+	// as a provisioned role sets no search_path. If one resolves against the
+	// wrong schema, the role is missing that setting: a provisioning defect to
+	// report, not something to work around in the connection string.
 	const params: string[] = [];
 	if (kv.sslmode) params.push(`sslmode=${kv.sslmode}`);
 	const searchPath = kv.options?.match(/search_path=([^\s]+)/)?.[1];

@@ -19,6 +19,11 @@ import {
 } from "../../amazonConstants.ts";
 import { parseWhenAst, type WhenAst_Duration } from "../../parseWhenAst.ts";
 import { boundTrue, isoDateParam, runCompiled } from "../../runCompiled.ts";
+import {
+	kyselySbAggregateHasPerAsinTwin_Product01,
+	kyselySbAggregateHasPerAsinTwin_SAP,
+	SPONSORED_BRANDS,
+} from "../../kyselySbAggregateHasPerAsinTwin.ts";
 import { jsonbText } from "../../sqlJson.ts";
 
 /**
@@ -591,33 +596,11 @@ function timeUnitGroupBy(tu: TimeUnit): GroupByEntry {
 
 const TIME_UNIT_OUTPUT_COLS = ["dateFirst", "dateLast"];
 
-// Dimensions that resolve to a specific product (directly or via family/parentAsin
-// lookup keyed on the resolved ASIN). Their presence in groupBy means the query is
-// at ASIN/product grain rather than store/total grain.
-const PRODUCT_GRAIN_DIMS: readonly GroupByDim[] = ["asin", "family", "parentAsin"];
-
-function isProductGrain(dims: readonly GroupByDim[]): boolean {
-	return dims.some((d) => PRODUCT_GRAIN_DIMS.includes(d));
-}
-
-// Sponsored Brands rows appear twice in both search_asin_placement__byDay and
-// product01__byDay: an aggregate row (advertisedProductId = '') carrying the true
-// campaign total, and per-ASIN breakdown rows that re-report a split of that spend.
-// Summing both double-counts SB.
-//
-//   - store/total grain: keep the aggregate row only and drop the per-ASIN rows
-//     (SP/SD have no aggregate row and are unaffected).
-//   - ASIN/product grain: keep the per-ASIN breakdown rows instead (the aggregate
-//     row only resolves to the ad's *first* creative ASIN via sb_asin_lookup, which
-//     would misattribute — or omit — spend for every other ASIN in the campaign) and
-//     drop the aggregate row so it isn't summed on top of the per-ASIN split.
-//
-// Only the OPERATOR differs between the two, so it lives here on its own while
-// each query builds the predicate with its own expression builder — that keeps
-// `r."adProduct"` and `r."advertisedProductId"` checked against `DB`.
-function sbDoubleCountOp(productGrain: boolean): "=" | "<>" {
-	return productGrain ? "=" : "<>";
-}
+// Sponsored Brands rows can hold a key's metrics twice, as an aggregate row
+// (advertisedProductId = '') and as per-ASIN rows, and either form can also stand
+// alone. Both queries count each key once, at every grain: its per-ASIN rows when
+// it has any, else its aggregate row (`kyselySbAggregateHasPerAsinTwin.ts`). An aggregate row
+// that counts resolves to its ad's first creative ASIN through sb_asin_lookup.
 
 /**
  * The resolved advertised ASIN for the search_asin_placement query, handling SB
@@ -1056,7 +1039,6 @@ function buildQuery1(
 ) {
 	return Either.gen(function* () {
 		const plan = dimPlan(dims);
-		const productGrain = isProductGrain(dims);
 		// One expression object, reused in the SELECT list, the GROUP BY, the two
 		// optional joins and the `--products` predicate: identical text everywhere.
 		const resolvedAsin = resolvedAsinExpr();
@@ -1100,10 +1082,12 @@ function buildQuery1(
 			// `range` derives from the caller's `when` (or from MAX(date)); bind both ends.
 			.where("r.date", ">=", isoDateParam(range.dateFirst))
 			.where("r.date", "<=", isoDateParam(range.dateLast))
+			// Each Sponsored Brands key once; see the note above `resolvedAsinExpr`.
 			.where((eb) =>
 				eb.not(eb.and([
-					eb("r.adProduct", "=", "Sponsored Brands"),
-					eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+					eb("r.adProduct", "=", SPONSORED_BRANDS),
+					eb("r.advertisedProductId", "=", ""),
+					eb.exists(kyselySbAggregateHasPerAsinTwin_SAP(db, "r")),
 				]))
 			);
 		if (productAsins) {
@@ -1181,7 +1165,6 @@ function buildQuery2(
 		// For halo-in, the ASIN is convertedProductId (which product received the halo).
 		// We still need sb_asin_lookup for dimensions that depend on the advertised product.
 		const plan = dimPlan(dims);
-		const productGrain = isProductGrain(dims);
 		const resolvedAsin = resolvedAsinExprProduct01();
 		// product01 has no placement column, so halo-in cannot be split by placement:
 		// this query groups without it and reports its rows under a NULL placement,
@@ -1222,14 +1205,13 @@ function buildQuery2(
 			.where("r.date", ">=", isoDateParam(range.dateFirst))
 			.where("r.date", "<=", isoDateParam(range.dateLast))
 			.where("r.productRelevance", "=", "Brand halo")
-			// Same SB aggregate/per-ASIN double-count as buildQuery1, level-aware the same
-			// way: at ASIN/product grain keep the per-ASIN breakdown rows (convertedProductId
-			// is populated on both the aggregate and per-ASIN rows, so grain is driven by the
-			// requested dims, not by which column this query keys on).
+			// Each Sponsored Brands key once, as in buildQuery1; product01's key is the
+			// ad, the converted product and its relevance.
 			.where((eb) =>
 				eb.not(eb.and([
-					eb("r.adProduct", "=", "Sponsored Brands"),
-					eb("r.advertisedProductId", sbDoubleCountOp(productGrain), ""),
+					eb("r.adProduct", "=", SPONSORED_BRANDS),
+					eb("r.advertisedProductId", "=", ""),
+					eb.exists(kyselySbAggregateHasPerAsinTwin_Product01(db, "r")),
 				]))
 			);
 		if (productAsins) {

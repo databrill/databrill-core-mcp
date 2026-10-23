@@ -151,6 +151,10 @@ The CLI follows the same routing and requires `--wsid`, e.g.
 (`deno task reports salesDropDiagnosis`) and this port against the **same** client
 DB and deep-compares every matched store (numeric tolerance 1e-9). It derives the
 `POSTGRES_URL` from the agency repo's `pg_service.conf` + `.env.local`.
+That entry's login predates Databrill's role provisioning, so the script copies
+the entry's `search_path` into the URL. It is the one place in this package that
+does: a provisioned workspace role already carries its `search_path`, and a
+connection made as one should never set it.
 
 ```bash
 bun run test/parity_salesDropDiagnosis.ts            # client=exampleclient
