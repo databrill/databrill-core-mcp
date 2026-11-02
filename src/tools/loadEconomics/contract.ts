@@ -3,7 +3,7 @@
  */
 
 import { stringArgument } from "../../toolParams.ts";
-import { Effect, Either, Schema } from "effect";
+import { Effect, Result, Schema } from "effect";
 import type { Sql } from "postgres";
 import { loadEconomics, type LoadEconomicsParams } from "./load.ts";
 import { EconomicsInputSchema } from "./economics.ts";
@@ -42,16 +42,16 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): Either.Either<LoadEconomicsParams, Error> {
-	return Either.gen(function* () {
+function parseParams(args: Record<string, unknown>): Result.Result<LoadEconomicsParams, Error> {
+	return Result.gen(function* () {
 		return {
 			stores: yield* stringArgument(args["stores"], "stores"),
 			when: yield* stringArgument(args["when"], "when"),
 			products: typeof args["products"] === "string" ? args["products"] : undefined,
 			economics: args["economics"] === undefined || args["economics"] === null
 				? null
-				: yield* Schema.decodeUnknownEither(EconomicsInputSchema)(args["economics"]).pipe(
-					Either.mapLeft((cause) => new Error(`Invalid economics: ${cause.message}`)),
+				: yield* Schema.decodeUnknownResult(EconomicsInputSchema)(args["economics"]).pipe(
+					Result.mapError((cause) => new Error(`Invalid economics: ${cause.message}`)),
 				),
 		};
 	});
@@ -71,5 +71,5 @@ export const loadEconomicsTool = {
 		"totalSpend / totalDirectOrders from `rollup`.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
-		Effect.flatMap(parseParams(args), (params) => loadEconomics(params, sql)),
+		Effect.flatMap(Effect.fromResult(parseParams(args)), (params) => loadEconomics(params, sql)),
 };

@@ -31,7 +31,7 @@
  * feature-origination rule does not apply to this tool family.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import {
@@ -77,8 +77,8 @@ const WRITE_ROW_LIMIT = MAX_ROW_LIMIT;
  * Exported for `tests/unit/sqlGuardrails.test.ts`, which checks the reserve against
  * the envelope this tool really produces. Nothing else calls it.
  */
-export function writeEnvelopeReserveBytes(): Either.Either<number, Error> {
-	return Either.gen(function* () {
+export function writeEnvelopeReserveBytes(): Result.Result<number, Error> {
+	return Result.gen(function* () {
 		const shape: RowBudget = { rowLimit: WRITE_ROW_LIMIT, byteLimit: MAX_RESULT_BYTES, envelopeReserveBytes: 0 };
 		const states: readonly (TruncationCap | null)[] = [null, "rows", "bytes"];
 		let reserve = 0;
@@ -106,11 +106,11 @@ export function writeEnvelopeReserveBytes(): Either.Either<number, Error> {
 
 export function writeSql(params: WriteSqlParams, sql: Sql, hooks?: McpToolHooks): Effect.Effect<WriteSqlResult, Error> {
 	return Effect.gen(function* () {
-		const statement = yield* trimStatement(params.sql);
+		const statement = yield* Effect.fromResult(trimStatement(params.sql));
 		const budget: RowBudget = {
 			rowLimit: WRITE_ROW_LIMIT,
 			byteLimit: MAX_RESULT_BYTES,
-			envelopeReserveBytes: yield* writeEnvelopeReserveBytes(),
+			envelopeReserveBytes: yield* Effect.fromResult(writeEnvelopeReserveBytes()),
 		};
 
 		const execution = yield* runWriteStatement(sql, statement, budget, hooks);

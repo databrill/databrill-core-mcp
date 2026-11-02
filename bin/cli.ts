@@ -9,9 +9,11 @@
 
 import "temporal-polyfill/global";
 import "dotenv/config";
-import { Command, Options } from "@effect/cli";
-import { NodeContext, NodeRuntime } from "@effect/platform-node";
-import { Effect, Either, Option } from "effect";
+import packageJson from "../package.json" with { type: "json" };
+import { Command, Flag } from "effect/cli";
+import { NodeRuntime, NodeServices } from "@effect/platform-node";
+import { Effect, Option, Result } from "effect";
+import { withEnvConfigProvider, withLogfmtLogger } from "../src/effectCompat.ts";
 import { tryOrOperationError } from "../src/effectErrors.ts";
 import type { Sql } from "postgres";
 import {
@@ -37,7 +39,7 @@ import { loadTflInventory } from "../src/tools/loadTflInventory/load.ts";
 import { load } from "../src/tools/salesDropDiagnosis/load.ts";
 import { render } from "../src/tools/salesDropDiagnosis/render.ts";
 
-function printJson(result: unknown): Either.Either<void, Error> {
+function printJson(result: unknown): Result.Result<void, Error> {
 	return tryOrOperationError(() => console.log(JSON.stringify(result, null, "\t")));
 }
 
@@ -52,8 +54,8 @@ const program = Effect.gen(function* () {
 	const provider = yield* acquireSqlProvider(config);
 
 	/** Shared required `--wsid` option. */
-	const wsidOption = Options.text("wsid").pipe(
-		Options.withDescription("Workspace id (required for every data command)"),
+	const wsidOption = Flag.String("wsid").pipe(
+		Flag.withDescription("Workspace id (required for every data command)"),
 	);
 
 	/** Resolve the connection for a command from its explicit `--wsid`. */
@@ -64,7 +66,7 @@ const program = Effect.gen(function* () {
 	function resolveFeatureSql(o: { wsid: string }, feature: string): Effect.Effect<Sql, Error> {
 		return Effect.gen(function* () {
 			const args = { wsid: o.wsid };
-			const enabled = workspaceHasFeature(yield* resolveWorkspace(config, args), feature);
+			const enabled = workspaceHasFeature(yield* Effect.fromResult(resolveWorkspace(config, args)), feature);
 			if (!enabled) {
 				return yield* Effect.fail(new Error(`This command requires the workspace feature "${feature}"`));
 			}
@@ -76,22 +78,22 @@ const program = Effect.gen(function* () {
 		"loadAds",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription(
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription(
 					"country code (US), region (na,eu,fe), marketplaceId, '*', or {merchantId}-{scope}",
 				),
 			),
-			when: Options.text("when").pipe(
-				Options.withDescription("ISO 8601 interval/duration: 2026-03-30/2026-04-05, P7D, P4W/2026-04-13"),
+			when: Flag.String("when").pipe(
+				Flag.withDescription("ISO 8601 interval/duration: 2026-03-30/2026-04-05, P7D, P4W/2026-04-13"),
 			),
-			groupBy: Options.text("groupBy").pipe(
-				Options.withDescription("Comma-separated dimensions (asin, family, adType, …)"),
+			groupBy: Flag.String("groupBy").pipe(
+				Flag.withDescription("Comma-separated dimensions (asin, family, adType, …)"),
 			),
-			timeUnit: Options.text("timeUnit").pipe(Options.optional),
-			products: Options.text("products").pipe(Options.optional),
-			filter: Options.text("filter").pipe(Options.optional),
-			derived: Options.boolean("derived").pipe(Options.withDefault(false)),
-			nested: Options.boolean("nested").pipe(Options.withDefault(false)),
+			timeUnit: Flag.String("timeUnit").pipe(Flag.optional),
+			products: Flag.String("products").pipe(Flag.optional),
+			filter: Flag.String("filter").pipe(Flag.optional),
+			derived: Flag.Boolean("derived").pipe(Flag.withDefault(false)),
+			nested: Flag.Boolean("nested").pipe(Flag.withDefault(false)),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -108,7 +110,7 @@ const program = Effect.gen(function* () {
 						nested: o.nested,
 						format: "json",
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(
@@ -121,23 +123,23 @@ const program = Effect.gen(function* () {
 		"salesDropDiagnosis",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("Comma-separated store filter: merchantId, country code, or merchantId-site"),
-				Options.optional,
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("Comma-separated store filter: merchantId, country code, or merchantId-site"),
+				Flag.optional,
 			),
-			allStores: Options.boolean("all-stores").pipe(
-				Options.withDescription("Include every store with data, not just configured countries"),
-				Options.withDefault(false),
+			allStores: Flag.Boolean("all-stores").pipe(
+				Flag.withDescription("Include every store with data, not just configured countries"),
+				Flag.withDefault(false),
 			),
-			format: Options.choice("format", ["console", "markdown", "json"]).pipe(
-				Options.withDescription("Output format"),
-				Options.withDefault("console" as const),
+			format: Flag.Literals("format", ["console", "markdown", "json"]).pipe(
+				Flag.withDescription("Output format"),
+				Flag.withDefault("console" as const),
 			),
-			recentDays: Options.integer("recent-days").pipe(Options.withDefault(7)),
-			baselineDays: Options.integer("baseline-days").pipe(Options.withDefault(28)),
-			dropThreshold: Options.float("drop-threshold").pipe(Options.withDefault(0.10)),
-			inventoryRunwayMax: Options.integer("inventory-runway-max").pipe(Options.withDefault(14)),
-			skipInventory: Options.boolean("skip-inventory").pipe(Options.withDefault(false)),
+			recentDays: Flag.Int("recent-days").pipe(Flag.withDefault(7)),
+			baselineDays: Flag.Int("baseline-days").pipe(Flag.withDefault(28)),
+			dropThreshold: Flag.Finite("drop-threshold").pipe(Flag.withDefault(0.10)),
+			inventoryRunwayMax: Flag.Int("inventory-runway-max").pipe(Flag.withDefault(14)),
+			skipInventory: Flag.Boolean("skip-inventory").pipe(Flag.withDefault(false)),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -153,7 +155,7 @@ const program = Effect.gen(function* () {
 						inventoryRunwayMax: o.inventoryRunwayMax,
 						skipInventory: o.skipInventory,
 					}, sql);
-					yield* render(rows, o.format);
+					yield* Effect.fromResult(render(rows, o.format));
 				}
 			}),
 	).pipe(
@@ -164,18 +166,18 @@ const program = Effect.gen(function* () {
 		"loadTraffic",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("country code, region, marketplaceId, '*', or {merchantId}-{scope}"),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("country code, region, marketplaceId, '*', or {merchantId}-{scope}"),
 			),
-			when: Options.text("when").pipe(
-				Options.withDescription("ISO interval/duration: P7D, 2026-03-30/2026-04-05"),
+			when: Flag.String("when").pipe(
+				Flag.withDescription("ISO interval/duration: P7D, 2026-03-30/2026-04-05"),
 			),
-			groupBy: Options.text("groupBy").pipe(Options.withDescription("asin (default) | family"), Options.optional),
-			timeUnit: Options.text("timeUnit").pipe(
-				Options.withDescription("WEEK (default) | DAY | MONTH"),
-				Options.optional,
+			groupBy: Flag.String("groupBy").pipe(Flag.withDescription("asin (default) | family"), Flag.optional),
+			timeUnit: Flag.String("timeUnit").pipe(
+				Flag.withDescription("WEEK (default) | DAY | MONTH"),
+				Flag.optional,
 			),
-			products: Options.text("products").pipe(Options.optional),
+			products: Flag.String("products").pipe(Flag.optional),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -188,7 +190,7 @@ const program = Effect.gen(function* () {
 						timeUnit: Option.getOrUndefined(o.timeUnit),
 						products: Option.getOrUndefined(o.products),
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Fetch Sales & Traffic metrics (sessions/units/sales/CR) per ASIN or family"));
@@ -197,18 +199,18 @@ const program = Effect.gen(function* () {
 		"loadSqp",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
 			),
-			when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
-			products: Options.text("products").pipe(Options.optional),
-			timeUnit: Options.text("timeUnit").pipe(
-				Options.withDescription("WEEK (default) | MONTH"),
-				Options.optional,
+			when: Flag.String("when").pipe(Flag.withDescription("ISO interval/duration")),
+			products: Flag.String("products").pipe(Flag.optional),
+			timeUnit: Flag.String("timeUnit").pipe(
+				Flag.withDescription("WEEK (default) | MONTH"),
+				Flag.optional,
 			),
-			keywordLimit: Options.integer("keywordLimit").pipe(
-				Options.withDescription("Top-N search queries by market impressions, 1-200 (default 25)"),
-				Options.optional,
+			keywordLimit: Flag.Int("keywordLimit").pipe(
+				Flag.withDescription("Top-N search queries by market impressions, 1-200 (default 25)"),
+				Flag.optional,
 			),
 		},
 		(o) =>
@@ -222,7 +224,7 @@ const program = Effect.gen(function* () {
 						timeUnit: Option.getOrUndefined(o.timeUnit),
 						keywordLimit: Option.getOrUndefined(o.keywordLimit),
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Fetch Search Query Performance: our-vs-market shares + top keywords"));
@@ -231,11 +233,11 @@ const program = Effect.gen(function* () {
 		"loadRank",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
 			),
-			when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
-			products: Options.text("products").pipe(Options.optional),
+			when: Flag.String("when").pipe(Flag.withDescription("ISO interval/duration")),
+			products: Flag.String("products").pipe(Flag.optional),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -246,7 +248,7 @@ const program = Effect.gen(function* () {
 						when: o.when,
 						products: Option.getOrUndefined(o.products),
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Fetch BSR (rank) trend per ASIN, with subcategory names"));
@@ -255,14 +257,14 @@ const program = Effect.gen(function* () {
 		"loadEconomics",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
 			),
-			when: Options.text("when").pipe(Options.withDescription("ISO interval/duration")),
-			products: Options.text("products").pipe(Options.optional),
-			economics: Options.text("economics").pipe(
-				Options.withDescription("JSON cost inputs {perAsin:{asin:{price,cogs,...}}}"),
-				Options.optional,
+			when: Flag.String("when").pipe(Flag.withDescription("ISO interval/duration")),
+			products: Flag.String("products").pipe(Flag.optional),
+			economics: Flag.String("economics").pipe(
+				Flag.withDescription("JSON cost inputs {perAsin:{asin:{price,cogs,...}}}"),
+				Flag.optional,
 			),
 		},
 		(o) =>
@@ -274,9 +276,11 @@ const program = Effect.gen(function* () {
 						stores: o.stores,
 						when: o.when,
 						products: Option.getOrUndefined(o.products),
-						economics: econRaw ? (yield* tryOrOperationError(() => JSON.parse(econRaw))) : null,
+						economics: econRaw
+							? (yield* Effect.fromResult(tryOrOperationError(() => JSON.parse(econRaw))))
+							: null,
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Per-ASIN profitability: ad rollup + (with cost inputs) net margin"));
@@ -285,16 +289,16 @@ const program = Effect.gen(function* () {
 		"inventoryPacing",
 		{
 			wsid: wsidOption,
-			stores: Options.text("stores").pipe(
-				Options.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("country/region/marketplaceId/'*'/{merchantId}-{scope}"),
 			),
-			velocityDays: Options.integer("velocity-days").pipe(Options.optional),
-			spendWindowDays: Options.integer("spend-window-days").pipe(Options.optional),
-			criticalDays: Options.integer("critical-days").pipe(Options.optional),
-			lowDays: Options.integer("low-days").pipe(Options.optional),
-			overstockDays: Options.integer("overstock-days").pipe(Options.optional),
-			minSpendPerDay: Options.float("min-spend-per-day").pipe(Options.optional),
-			minVelocity: Options.float("min-velocity").pipe(Options.optional),
+			velocityDays: Flag.Int("velocity-days").pipe(Flag.optional),
+			spendWindowDays: Flag.Int("spend-window-days").pipe(Flag.optional),
+			criticalDays: Flag.Int("critical-days").pipe(Flag.optional),
+			lowDays: Flag.Int("low-days").pipe(Flag.optional),
+			overstockDays: Flag.Int("overstock-days").pipe(Flag.optional),
+			minSpendPerDay: Flag.Finite("min-spend-per-day").pipe(Flag.optional),
+			minVelocity: Flag.Finite("min-velocity").pipe(Flag.optional),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -310,7 +314,7 @@ const program = Effect.gen(function* () {
 						minSpendPerDay: Option.getOrUndefined(o.minSpendPerDay),
 						minVelocity: Option.getOrUndefined(o.minVelocity),
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Recommend ad pacing from inventory runway: pause/throttle/hold/ramp per family"));
@@ -319,20 +323,20 @@ const program = Effect.gen(function* () {
 		"loadTflInventory",
 		{
 			wsid: wsidOption,
-			products: Options.text("products").pipe(
-				Options.withDescription("Comma-separated exact product ids, product names, or SKUs"),
-				Options.optional,
+			products: Flag.String("products").pipe(
+				Flag.withDescription("Comma-separated exact product ids, product names, or SKUs"),
+				Flag.optional,
 			),
-			warehouses: Options.text("warehouses").pipe(
-				Options.withDescription("Comma-separated exact warehouse ids or names"),
-				Options.optional,
+			warehouses: Flag.String("warehouses").pipe(
+				Flag.withDescription("Comma-separated exact warehouse ids or names"),
+				Flag.optional,
 			),
-			asOf: Options.text("as-of").pipe(
-				Options.withDescription("Latest daily snapshot on or before YYYY-MM-DD"),
-				Options.optional,
+			asOf: Flag.String("as-of").pipe(
+				Flag.withDescription("Latest daily snapshot on or before YYYY-MM-DD"),
+				Flag.optional,
 			),
-			maxAvailable: Options.float("max-available").pipe(Options.optional),
-			limit: Options.integer("limit").pipe(Options.optional),
+			maxAvailable: Flag.Finite("max-available").pipe(Flag.optional),
+			limit: Flag.Int("limit").pipe(Flag.optional),
 		},
 		(o) =>
 			Effect.gen(function* () {
@@ -345,7 +349,7 @@ const program = Effect.gen(function* () {
 						maxAvailable: Option.getOrUndefined(o.maxAvailable),
 						limit: Option.getOrUndefined(o.limit),
 					}, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Fetch the latest The Fulfillment Lab product-by-warehouse inventory snapshot"));
@@ -358,7 +362,7 @@ const program = Effect.gen(function* () {
 				const sql = yield* resolveFeatureSql(o, SQL_FEATURE);
 				{
 					const result = yield* listTables(sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("List the tables and views in the workspace's own schema"));
@@ -367,8 +371,8 @@ const program = Effect.gen(function* () {
 		"describeTable",
 		{
 			wsid: wsidOption,
-			table: Options.text("table").pipe(
-				Options.withDescription("Bare table name (no schema qualifier) in the workspace's own schema"),
+			table: Flag.String("table").pipe(
+				Flag.withDescription("Bare table name (no schema qualifier) in the workspace's own schema"),
 			),
 		},
 		(o) =>
@@ -376,7 +380,7 @@ const program = Effect.gen(function* () {
 				const sql = yield* resolveFeatureSql(o, SQL_FEATURE);
 				{
 					const result = yield* describeTable({ table: o.table }, sql);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Describe one table's columns, data types and nullability"));
@@ -385,10 +389,10 @@ const program = Effect.gen(function* () {
 		"executeSql",
 		{
 			wsid: wsidOption,
-			sql: Options.text("sql").pipe(Options.withDescription("Exactly one read-only SQL statement")),
-			limit: Options.integer("limit").pipe(
-				Options.withDescription("Maximum rows to return; a request above the maximum is rejected"),
-				Options.optional,
+			sql: Flag.String("sql").pipe(Flag.withDescription("Exactly one read-only SQL statement")),
+			limit: Flag.Int("limit").pipe(
+				Flag.withDescription("Maximum rows to return; a request above the maximum is rejected"),
+				Flag.optional,
 			),
 		},
 		(o) =>
@@ -396,7 +400,7 @@ const program = Effect.gen(function* () {
 				const client = yield* resolveFeatureSql(o, SQL_FEATURE);
 				{
 					const result = yield* executeSql({ sql: o.sql, limit: Option.getOrUndefined(o.limit) }, client);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Run one read-only SQL statement in a read-only transaction with caps"));
@@ -405,14 +409,14 @@ const program = Effect.gen(function* () {
 		"writeSql",
 		{
 			wsid: wsidOption,
-			sql: Options.text("sql").pipe(Options.withDescription("Exactly one write statement")),
+			sql: Flag.String("sql").pipe(Flag.withDescription("Exactly one write statement")),
 		},
 		(o) =>
 			Effect.gen(function* () {
 				const client = yield* resolveFeatureSql(o, SQL_WRITE_FEATURE);
 				{
 					const result = yield* writeSql({ sql: o.sql }, client);
-					yield* printJson(result);
+					yield* Effect.fromResult(printJson(result));
 				}
 			}),
 	).pipe(Command.withDescription("Run one write statement; the database role's grants decide what it may touch"));
@@ -434,12 +438,14 @@ const program = Effect.gen(function* () {
 		]),
 	);
 
-	const cli = Command.run(root, { name: "core-mcp", version: "0.2.9" });
+	const cli = Command.runWith(root, { version: packageJson.version });
 
-	return yield* cli(process.argv);
+	return yield* cli(process.argv.slice(2));
 }).pipe(Effect.scoped);
 
 program.pipe(
-	Effect.provide(NodeContext.layer),
+	Effect.provide(NodeServices.layer),
+	withEnvConfigProvider,
+	withLogfmtLogger,
 	NodeRuntime.runMain,
 );

@@ -101,7 +101,7 @@ function runReference(): StoreDiagnosis[] {
 }
 
 async function runPort(url: string): Promise<StoreDiagnosis[]> {
-	const sql = await Effect.runPromise(getSql(url));
+	const sql = await Effect.runPromise(Effect.fromResult(getSql(url)));
 	try {
 		return await Effect.runPromise(
 			load({

@@ -1,4 +1,5 @@
-import { Effect, Either, Exit, Runtime } from "effect";
+import { Effect, Exit, Result } from "effect";
+import { causeToRejection } from "./effectCompat.ts";
 
 /** Retain foreign Error identity and preserve non-Error rejection values as causes. */
 export function toError(cause: unknown): Error {
@@ -10,10 +11,7 @@ export function exitValue<A, E>(exit: Exit.Exit<A, E>): A {
 	if (Exit.isSuccess(exit)) {
 		return exit.value;
 	}
-	if (exit.cause._tag === "Fail") {
-		throw exit.cause.error;
-	}
-	throw Runtime.makeFiberFailure(exit.cause);
+	throw causeToRejection(exit.cause);
 }
 
 /** Only absent relations/columns justify the optional metric fallback. */
@@ -25,8 +23,8 @@ export function isMissingRelationOrColumn(error: Error): boolean {
 }
 
 /** Run synchronous work, preserving foreign errors and their causes. */
-export function tryOrOperationError<A>(fn: () => A): Either.Either<A, Error> {
-	return Either.try({ try: fn, catch: toError });
+export function tryOrOperationError<A>(fn: () => A): Result.Result<A, Error> {
+	return Result.try({ try: fn, catch: toError });
 }
 
 /** Run Promise work, preserving foreign errors and their causes. */

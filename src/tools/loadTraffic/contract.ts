@@ -3,7 +3,7 @@
  */
 
 import { stringArgument } from "../../toolParams.ts";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import { loadTraffic } from "./load.ts";
 import { type LoadTrafficParams, VALID_TRAFFIC_GROUP_BY, VALID_TRAFFIC_TIME_UNITS } from "./types.ts";
@@ -44,8 +44,8 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): Either.Either<LoadTrafficParams, Error> {
-	return Either.gen(function* () {
+function parseParams(args: Record<string, unknown>): Result.Result<LoadTrafficParams, Error> {
+	return Result.gen(function* () {
 		return {
 			stores: yield* stringArgument(args["stores"], "stores"),
 			when: yield* stringArgument(args["when"], "when"),
@@ -67,5 +67,5 @@ export const loadTrafficTool = {
 		"(amzreport_SALES_AND_TRAFFIC__skuByDay).",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
-		Effect.flatMap(parseParams(args), (params) => loadTraffic(params, sql)),
+		Effect.flatMap(Effect.fromResult(parseParams(args)), (params) => loadTraffic(params, sql)),
 };

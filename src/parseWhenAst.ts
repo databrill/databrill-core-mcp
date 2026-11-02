@@ -1,4 +1,4 @@
-import { Either } from "effect";
+import { Result } from "effect";
 import { type Duration, parse as parseDuration } from "tinyduration";
 
 // Re-export tinyduration's Duration type with our naming
@@ -59,11 +59,11 @@ export interface WhenAstError {
 	readonly cause?: unknown;
 }
 
-export function parseWhenAst(when: string): Either.Either<WhenAst, WhenAstError> {
+export function parseWhenAst(when: string): Result.Result<WhenAst, WhenAstError> {
 	const trimmed = when.trim();
 
 	if (trimmed === "") {
-		return Either.left({ message: "Empty input", input: when });
+		return Result.fail({ message: "Empty input", input: when });
 	}
 
 	// Check for interval (contains '/' or '--')
@@ -73,32 +73,32 @@ export function parseWhenAst(when: string): Either.Either<WhenAst, WhenAstError>
 		const rightStr = trimmed.slice(separator.index + separator.length);
 
 		if (leftStr === "" || rightStr === "") {
-			return Either.left({ message: "Invalid interval: missing left or right side", input: when });
+			return Result.fail({ message: "Invalid interval: missing left or right side", input: when });
 		}
 
 		const left = parsePrimitive(leftStr);
-		if (Either.isLeft(left)) {
-			return Either.left({
-				...left.left,
-				message: `Invalid interval left side: ${left.left.message}`,
+		if (Result.isFailure(left)) {
+			return Result.fail({
+				...left.failure,
+				message: `Invalid interval left side: ${left.failure.message}`,
 				input: when,
 			});
 		}
 
 		const right = parsePrimitive(rightStr);
-		if (Either.isLeft(right)) {
-			return Either.left({
-				...right.left,
-				message: `Invalid interval right side: ${right.left.message}`,
+		if (Result.isFailure(right)) {
+			return Result.fail({
+				...right.failure,
+				message: `Invalid interval right side: ${right.failure.message}`,
 				input: when,
 			});
 		}
 
-		return makeInterval(left.right, right.right, when);
+		return makeInterval(left.success, right.success, when);
 	}
 
 	// Not an interval, parse as primitive
-	return Either.mapLeft(parsePrimitive(trimmed), (error) => ({ ...error, input: when }));
+	return Result.mapError(parsePrimitive(trimmed), (error) => ({ ...error, input: when }));
 }
 
 function findIntervalSeparator(input: string): { readonly index: number; readonly length: number } | null {
@@ -117,23 +117,23 @@ function findIntervalSeparator(input: string): { readonly index: number; readonl
 	return null;
 }
 
-function parsePrimitive(input: string): Either.Either<WhenAst_Primitive, WhenAstError> {
+function parsePrimitive(input: string): Result.Result<WhenAst_Primitive, WhenAstError> {
 	// Try datetime first (most specific)
 	const datetime = tryParseDateTime(input);
 	if (datetime) {
-		return Either.right(datetime);
+		return Result.succeed(datetime);
 	}
 
 	// Try date
 	const date = tryParseDate(input);
 	if (date) {
-		return Either.right(date);
+		return Result.succeed(date);
 	}
 
 	// Try time
 	const time = tryParseTime(input);
 	if (time) {
-		return Either.right(time);
+		return Result.succeed(time);
 	}
 
 	// Try duration
@@ -144,28 +144,28 @@ function makeInterval(
 	left: WhenAst_Primitive,
 	right: WhenAst_Primitive,
 	originalInput: string,
-): Either.Either<WhenAst_Interval, WhenAstError> {
+): Result.Result<WhenAst_Interval, WhenAstError> {
 	// Date/Date
 	if (left._tag === "Date" && right._tag === "Date") {
-		return Either.right({ _tag: "Interval_DateDate", left, right });
+		return Result.succeed({ _tag: "Interval_DateDate", left, right });
 	}
 
 	// DateTime/DateTime
 	if (left._tag === "DateTime" && right._tag === "DateTime") {
-		return Either.right({ _tag: "Interval_DateTimeDatetime", left, right });
+		return Result.succeed({ _tag: "Interval_DateTimeDatetime", left, right });
 	}
 
 	// Date or DateTime / Duration
 	if ((left._tag === "Date" || left._tag === "DateTime") && right._tag === "Duration") {
-		return Either.right({ _tag: "Interval_DateDuration", left, right });
+		return Result.succeed({ _tag: "Interval_DateDuration", left, right });
 	}
 
 	// Duration / Date or DateTime
 	if (left._tag === "Duration" && (right._tag === "Date" || right._tag === "DateTime")) {
-		return Either.right({ _tag: "Interval_DurationDate", left, right });
+		return Result.succeed({ _tag: "Interval_DurationDate", left, right });
 	}
 
-	return Either.left({
+	return Result.fail({
 		message: `Invalid interval combination: ${left._tag}/${right._tag}`,
 		input: originalInput,
 	});
@@ -240,11 +240,11 @@ function tryParseTime(input: string): WhenAst_Time | null {
 	return null;
 }
 
-function parseDurationAst(input: string): Either.Either<WhenAst_Duration, WhenAstError> {
+function parseDurationAst(input: string): Result.Result<WhenAst_Duration, WhenAstError> {
 	if (!DURATION_PATTERN.test(input)) {
-		return Either.left({ message: "Unable to parse as date, time, datetime, or duration", input });
+		return Result.fail({ message: "Unable to parse as date, time, datetime, or duration", input });
 	}
-	return Either.try({
+	return Result.try({
 		try: () => ({ ...parseDuration(input), _tag: "Duration" as const }),
 		catch: (cause): WhenAstError => ({
 			message: "Unable to parse as date, time, datetime, or duration",

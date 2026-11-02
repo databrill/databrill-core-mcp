@@ -18,7 +18,8 @@
  * no routing directory to expose `listWorkspaces` without a `wsid` tool argument.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
+import { runEffectPromiseExit } from "./effectCompat.ts";
 import { exitValue, tryOrOperationError } from "./effectErrors.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -152,10 +153,10 @@ function isAllowedForCall(
 		return true;
 	}
 	const feature = tool.feature;
-	return Either.match(resolveWorkspace(config, args), {
-		onRight: (workspace) => workspaceHasFeature(workspace, feature),
+	return Result.match(resolveWorkspace(config, args), {
+		onSuccess: (workspace) => workspaceHasFeature(workspace, feature),
 		// Let the connection resolver report invalid explicit workspace selection.
-		onLeft: () => true,
+		onFailure: () => true,
 	});
 }
 
@@ -164,14 +165,14 @@ export function registerTools(
 	getSql: (
 		args: Record<string, unknown>,
 		access: McpToolAccess,
-	) => Effect.Effect<Sql, Error> | Either.Either<Sql, Error>,
+	) => Effect.Effect<Sql, Error> | Result.Result<Sql, Error>,
 	config?: WorkspaceDirectory | null,
 	options: RegisterToolsOptions = {},
-): Either.Either<void, Error> {
+): Result.Result<void, Error> {
 	return tryOrOperationError(() => {
 		const discoveryDirectory = config ?? options.discoveryDirectory;
 		server.setRequestHandler(ListToolsRequestSchema, () =>
-			Either.getOrThrowWith(
+			Result.getOrThrowWith(
 				tryOrOperationError(() => {
 					const listed = tools.filter((tool) => isVisible(tool, config, options)).map((tool) => ({
 						name: tool.name,
@@ -199,7 +200,7 @@ export function registerTools(
 		server.setRequestHandler(
 			CallToolRequestSchema,
 			(req: CallToolRequest, extra: { readonly signal: AbortSignal }) =>
-				Effect.runPromiseExit(dispatch(req), { signal: extra.signal }).then(exitValue),
+				runEffectPromiseExit(dispatch(req), { signal: extra.signal }).then(exitValue),
 		);
 
 		function dispatch(req: CallToolRequest): Effect.Effect<CallToolResult, Error> {
@@ -207,7 +208,7 @@ export function registerTools(
 				const args = req.params.arguments ?? {};
 
 				if (discoveryDirectory && req.params.name === LIST_WORKSPACES) {
-					const text = yield* encodeToolResult(summarizeConfig(discoveryDirectory));
+					const text = yield* Effect.fromResult(encodeToolResult(summarizeConfig(discoveryDirectory)));
 					return { content: [{ type: "text", text }] };
 				}
 
@@ -217,13 +218,13 @@ export function registerTools(
 				}
 				return yield* Effect.gen(function* () {
 					const access = tool.access ?? "read";
-					const resolve = yield* tryOrOperationError(() => getSql(args, access));
-					const sql = yield* resolve;
-					const hooks = yield* tryOrOperationError(() => options.getHooks?.(args, access));
+					const resolve = yield* Effect.fromResult(tryOrOperationError(() => getSql(args, access)));
+					const sql = yield* (Result.isResult(resolve) ? Effect.fromResult(resolve) : resolve);
+					const hooks = yield* Effect.fromResult(tryOrOperationError(() => options.getHooks?.(args, access)));
 					const result = yield* tool.run(args, sql, hooks);
-					const text = yield* encodeToolResult(result);
+					const text = yield* Effect.fromResult(encodeToolResult(result));
 					return { content: [{ type: "text" as const, text }] };
-				}).pipe(Effect.catchAll((err) =>
+				}).pipe(Effect.catch((err) =>
 					Effect.succeed({
 						content: [{ type: "text" as const, text: `Error: ${err.message}` }],
 						isError: true,

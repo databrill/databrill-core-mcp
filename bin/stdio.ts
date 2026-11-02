@@ -9,7 +9,9 @@
 
 import "temporal-polyfill/global";
 import "dotenv/config";
+import packageJson from "../package.json" with { type: "json" };
 import { Effect } from "effect";
+import { runEffectPromiseExit } from "../src/effectCompat.ts";
 import { exitValue, tryOrOperationError, tryPromiseOrOperationError } from "../src/effectErrors.ts";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -27,21 +29,21 @@ const program = Effect.gen(function* () {
 	const provider = yield* acquireSqlProvider(config);
 	const server = yield* Effect.acquireRelease(
 		Effect.suspend(() =>
-			tryOrOperationError(() =>
+			Effect.fromResult(tryOrOperationError(() =>
 				new Server(
-					{ name: "databrill-core-mcp", version: "0.2.9" },
+					{ name: "databrill-core-mcp", version: packageJson.version },
 					{ capabilities: { tools: {} } },
 				)
-			)
+			))
 		),
 		(server) => Effect.orDie(tryPromiseOrOperationError(() => server.close())),
 	);
 
 	// One connection per workspace, so the tool's access kind changes nothing here.
-	yield* registerTools(server, (args, _access) => provider.getSqlForArgs(args), config);
+	yield* Effect.fromResult(registerTools(server, (args, _access) => provider.getSqlForArgs(args), config));
 	yield* tryPromiseOrOperationError(() => server.connect(new StdioServerTransport()));
 	// Input closure and process signals end the scope; remove listeners on every exit.
-	yield* Effect.async<void>((resume) => {
+	yield* Effect.callback<void>((resume) => {
 		function shutdown() {
 			process.off("SIGINT", shutdown);
 			process.off("SIGTERM", shutdown);
@@ -62,4 +64,4 @@ const program = Effect.gen(function* () {
 	});
 }).pipe(Effect.scoped);
 
-await Effect.runPromiseExit(program).then(exitValue);
+await runEffectPromiseExit(program).then(exitValue);

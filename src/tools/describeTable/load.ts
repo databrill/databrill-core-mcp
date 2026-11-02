@@ -25,7 +25,7 @@
  * feature-origination rule does not apply to this tool family.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
@@ -42,14 +42,14 @@ interface DbColumnRow {
 	readonly columnDefault: string | null;
 }
 
-function parseTable(value: string | undefined): Either.Either<string, Error> {
-	return Either.gen(function* () {
+function parseTable(value: string | undefined): Result.Result<string, Error> {
+	return Result.gen(function* () {
 		const table = value ?? "";
 		if (table === "") {
-			return yield* Either.left(new Error("table is required and must be a bare table name"));
+			return yield* Result.fail(new Error("table is required and must be a bare table name"));
 		}
 		if (!isSupportedTableName(table)) {
-			return yield* Either.left(
+			return yield* Result.fail(
 				new Error(
 					`table is not a name this MCP supports; got "${table}". ${SUPPORTED_TABLE_NAME_RULE} ` +
 						"Pass the name exactly as listTables reports it — no schema qualifier, no quoting of your own. " +
@@ -67,7 +67,7 @@ export function describeTable(
 	hooks?: McpToolHooks,
 ): Effect.Effect<DescribeTableResult, Error> {
 	return Effect.gen(function* () {
-		const table = yield* parseTable(params.table);
+		const table = yield* Effect.fromResult(parseTable(params.table));
 
 		return (yield* withReadTransaction(sql, hooks, (tx) =>
 			Effect.gen(function* () {

@@ -6,7 +6,7 @@
  * included) is zero with source="missing", and only the rollup carries data.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import postgres from "postgres";
 import { loadAds } from "../loadAds/loadAds.ts";
 import {
@@ -16,8 +16,8 @@ import {
 	type PerSaleEconomics,
 } from "./economics.ts";
 
-function fail(msg: string): Either.Either<never, Error> {
-	return Either.left(new Error(msg));
+function fail(msg: string): Result.Result<never, Error> {
+	return Result.fail(new Error(msg));
 }
 
 function round2(n: number): number {
@@ -42,8 +42,8 @@ export function loadEconomics(
 	sql: postgres.Sql,
 ): Effect.Effect<LoadEconomicsResult, Error> {
 	return Effect.gen(function* () {
-		if (!params.stores) return yield* fail("stores is required");
-		if (!params.when) return yield* fail("when is required");
+		if (!params.stores) return yield* Effect.fromResult(fail("stores is required"));
+		if (!params.when) return yield* Effect.fromResult(fail("when is required"));
 
 		const ads = yield* loadAds(
 			{ stores: params.stores, when: params.when, groupBy: "asin", products: params.products, derived: false },

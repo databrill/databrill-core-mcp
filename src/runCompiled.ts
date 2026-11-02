@@ -48,7 +48,7 @@ export function runCompiled<O>(
 	query: CompiledQuery<O> | (() => CompiledQuery<O>),
 ): Effect.Effect<O[], Error> {
 	return Effect.gen(function* () {
-		const compiled = typeof query === "function" ? yield* tryOrOperationError(query) : query;
+		const compiled = typeof query === "function" ? yield* Effect.fromResult(tryOrOperationError(query)) : query;
 		if (compiled.parameters.length === 0) {
 			return yield* Effect.fail(
 				new Error(

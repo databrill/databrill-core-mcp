@@ -16,7 +16,7 @@ import {
 	loadAmazonReportSalesAndTraffic,
 	MISSING_FAMILY,
 } from "@jsr/databrill__core-pg-kysely/canonical";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type postgres from "postgres";
 import {
 	type DateRange,
@@ -51,8 +51,8 @@ interface MarketplaceGroup {
 	readonly merchantIds: Set<string>;
 }
 
-function fail(msg: string): Either.Either<never, Error> {
-	return Either.left(new Error(msg));
+function fail(msg: string): Result.Result<never, Error> {
+	return Result.fail(new Error(msg));
 }
 
 function round2(n: number): number {
@@ -67,8 +67,8 @@ function isTrafficTimeUnit(value: string): value is TrafficTimeUnit {
 	return VALID_TRAFFIC_TIME_UNITS.some((candidate) => candidate === value);
 }
 
-function parseTrafficGroupBy(value: string): Either.Either<TrafficGroupBy, Error> {
-	return Either.gen(function* () {
+function parseTrafficGroupBy(value: string): Result.Result<TrafficGroupBy, Error> {
+	return Result.gen(function* () {
 		if (isTrafficGroupBy(value)) {
 			return value;
 		}
@@ -76,8 +76,8 @@ function parseTrafficGroupBy(value: string): Either.Either<TrafficGroupBy, Error
 	});
 }
 
-function parseTrafficTimeUnit(value: string): Either.Either<TrafficTimeUnit, Error> {
-	return Either.gen(function* () {
+function parseTrafficTimeUnit(value: string): Result.Result<TrafficTimeUnit, Error> {
+	return Result.gen(function* () {
 		if (isTrafficTimeUnit(value)) {
 			return value;
 		}
@@ -152,20 +152,22 @@ function compareTrafficRows(left: TrafficRow, right: TrafficRow, groupBy: Traffi
 
 export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effect.Effect<LoadTrafficResult, Error> {
 	return Effect.gen(function* () {
-		if (!params.stores) return yield* fail("stores is required");
-		if (!params.when) return yield* fail("when is required");
+		if (!params.stores) return yield* Effect.fromResult(fail("stores is required"));
+		if (!params.when) return yield* Effect.fromResult(fail("when is required"));
 
-		const groupBy = yield* parseTrafficGroupBy(params.groupBy ?? "asin");
-		const timeUnit = yield* parseTrafficTimeUnit(params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK");
+		const groupBy = yield* Effect.fromResult(parseTrafficGroupBy(params.groupBy ?? "asin"));
+		const timeUnit = yield* Effect.fromResult(
+			parseTrafficTimeUnit(params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK"),
+		);
 
 		const stores = yield* resolveStores(params.stores, sql);
 		const marketplaceGroups = groupStoresByMarketplace(stores);
-		const when = yield* parseWhenRange(params.when);
+		const when = yield* Effect.fromResult(parseWhenRange(params.when));
 
 		let productAsins: string[] | null = null;
 		if (params.products) {
 			productAsins = yield* resolveProducts(params.products, sql);
-			if (productAsins.length === 0) return yield* fail("products resolved to zero ASINs");
+			if (productAsins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 
 		const db = createCanonicalQueryBuilder();
@@ -198,19 +200,19 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 				const probe = probes[index];
 				const group = marketplaceGroups[index];
 				if (probe === undefined || group === undefined) {
-					return yield* fail("Internal loadTraffic marketplace probe mismatch");
+					return yield* Effect.fromResult(fail("Internal loadTraffic marketplace probe mismatch"));
 				}
 				if (probe.window === null) {
-					return yield* fail(`${group.countryCode}: ${resultError(probe)}`);
+					return yield* Effect.fromResult(fail(`${group.countryCode}: ${resultError(probe)}`));
 				}
 				if (earliestDate === null || probe.window.dateLast < earliestDate) {
 					earliestDate = probe.window.dateLast;
 				}
 			}
 			if (earliestDate === null) {
-				return yield* fail("No Sales and Traffic marketplaces were resolved");
+				return yield* Effect.fromResult(fail("No Sales and Traffic marketplaces were resolved"));
 			}
-			range = yield* resolveTrailingRange(when.duration, earliestDate);
+			range = yield* Effect.fromResult(resolveTrailingRange(when.duration, earliestDate));
 		}
 
 		const canonicalResults = yield* Effect.all(
@@ -228,10 +230,10 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 			const result = canonicalResults[index];
 			const group = marketplaceGroups[index];
 			if (result === undefined || group === undefined) {
-				return yield* fail("Internal loadTraffic marketplace result mismatch");
+				return yield* Effect.fromResult(fail("Internal loadTraffic marketplace result mismatch"));
 			}
 			if (when.kind === "trailing" && result.window === null) {
-				return yield* fail(`${group.countryCode}: ${resultError(result)}`);
+				return yield* Effect.fromResult(fail(`${group.countryCode}: ${resultError(result)}`));
 			}
 			for (const row of result.rows) {
 				data.push(mapTrafficRow(row, group, groupBy));

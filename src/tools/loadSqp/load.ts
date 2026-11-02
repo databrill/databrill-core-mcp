@@ -42,7 +42,7 @@
  * the table — fix the data, do not switch to `AVG`, which would hide it.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
@@ -60,8 +60,8 @@ import {
 	VALID_SQP_TIME_UNITS,
 } from "./types.ts";
 
-function fail(msg: string): Either.Either<never, Error> {
-	return Either.left(new Error(msg));
+function fail(msg: string): Result.Result<never, Error> {
+	return Result.fail(new Error(msg));
 }
 
 function round3(n: number): number {
@@ -73,8 +73,8 @@ function share(part: number, whole: number): number {
 }
 
 /** Validate keywordLimit: a whole number from 1 to MAX_KEYWORD_LIMIT; above the maximum is rejected, not clamped. */
-export function parseKeywordLimit(value: number | undefined): Either.Either<number, Error> {
-	return Either.gen(function* () {
+export function parseKeywordLimit(value: number | undefined): Result.Result<number, Error> {
+	return Result.gen(function* () {
 		if (value === undefined) {
 			return DEFAULT_KEYWORD_LIMIT;
 		}
@@ -92,14 +92,16 @@ export function parseKeywordLimit(value: number | undefined): Either.Either<numb
 
 export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect<LoadSqpResult, Error> {
 	return Effect.gen(function* () {
-		if (!params.stores) return yield* fail("stores is required");
-		if (!params.when) return yield* fail("when is required");
+		if (!params.stores) return yield* Effect.fromResult(fail("stores is required"));
+		if (!params.when) return yield* Effect.fromResult(fail("when is required"));
 
 		const timeUnit = (params.timeUnit ? params.timeUnit.toUpperCase() : "WEEK") as SqpTimeUnit;
 		if (!VALID_SQP_TIME_UNITS.includes(timeUnit)) {
-			return yield* fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_SQP_TIME_UNITS.join(", ")}`);
+			return yield* Effect.fromResult(
+				fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_SQP_TIME_UNITS.join(", ")}`),
+			);
 		}
-		const keywordLimit = yield* parseKeywordLimit(params.keywordLimit);
+		const keywordLimit = yield* Effect.fromResult(parseKeywordLimit(params.keywordLimit));
 
 		const stores = yield* resolveStores(params.stores, sql);
 		const marketplaceIds = [...new Set(stores.map((s) => s.marketplaceId))];
@@ -108,7 +110,7 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 		let asins: string[] | null = null;
 		if (params.products) {
 			asins = yield* resolveProducts(params.products, sql);
-			if (asins.length === 0) return yield* fail("products resolved to zero ASINs");
+			if (asins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 		// One builder for the whole invocation, built before the CTE: it is where a
 		// future `.withSchema(workspaceSchema)` would attach.

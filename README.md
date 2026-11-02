@@ -25,7 +25,7 @@ src/
   tools/writeSql/          # one write statement, bounded by the role's grants
 bin/
   stdio.ts                 # MCP stdio frontend (Desktop / dev)
-  cli.ts                   # @effect/cli frontend (dev / agency / parity)
+  cli.ts                   # effect/cli frontend (dev / agency / parity)
 test/
   parity_salesDropDiagnosis.ts   # vs the agency reference report, same DB
 ```
@@ -58,21 +58,22 @@ MCP client config (Desktop / dev):
 
 SDK registration, string argument validation, SQL client construction, date parsing,
 advertising SQL compilation, report validation, JSON serialization and diagnosis
-rendering return `Either<Value, Error>` and execute when called.
-Read their `Left`/`Right` result directly. Infallible helpers and query-builder
+rendering return `Result<Value, Error>` and execute when called.
+Read their `Failure`/`Success` result directly. Infallible helpers and query-builder
 construction return ordinary values.
 
 Advertising, report, sales-diagnosis, inventory-pacing and TFL inventory loaders,
 the `McpTool.run` contract, transaction programs, hooks, provider acquisition and
 teardown, and application lifecycles use
 lazy Effect programs. Use `yield*` to compose
-both Either and Effect inside an Effect, and run the runtime only at an
+an Effect inside an Effect, and `yield* Effect.fromResult(…)` for a `Result` (Effect 4's
+`Effect.gen` does not accept a yielded `Result`); run the runtime only at an
 application boundary. Constructing a database program does not query or acquire
 a pool.
 
-`registerTools` returns `Either<void, Error>` after registering the SDK handlers.
+`registerTools` returns `Result<void, Error>` after registering the SDK handlers.
 It accepts connection resolvers returning `Effect<Sql, Error>` or
-`Either<Sql, Error>`; hosted lookups are synchronous while a local provider may
+`Result<Sql, Error>`; hosted lookups are synchronous while a local provider may
 wait for concurrent teardown. Optional `getHooks` callbacks return plain
 `McpToolHooks`, and each asynchronous `assertIdentity` hook returns
 `Effect<void, Error>`. SDK request handlers execute async dispatch with the
@@ -87,7 +88,7 @@ The CLI and stdio programs finish with `Effect.scoped`; stdio acquires its serve
 scope, so server shutdown precedes pool teardown. Cleanup failures become defects and remain
 in the Cause alongside work failures and interruption.
 
-Effect is a public dependency pinned to 3.21.2. Consumers composing local package
+Effect is a public dependency pinned to 4.0.6. Consumers composing local package
 source must resolve the same Effect version: different versions have incompatible
 private iterator types. The database driver's own query objects and transaction
 callbacks retain their native contracts; owned tool programs remain Effects.
@@ -119,10 +120,10 @@ value the example above states explicitly.
 
 With a config the server:
 
-- pools one connection per workspace, taking each registry entry's connection
-  string at its word;
-- adds a required `wsid` argument (enum of the configured workspaces) to every
-  tool, plus a `listWorkspaces` discovery tool;
+- keeps one connection pool per workspace, taking each registry entry's
+  connection string at its word;
+- adds a required `wsid` argument (enum of the configured workspaces that may
+  call it) to every tool, plus a `listWorkspaces` discovery tool;
 - routes each call only by that explicit `wsid`. Registry size and `stores` never
   select a workspace.
 
@@ -169,7 +170,7 @@ CLIENT=exampleclient AGENCY_REPO=~/src/agency-repo bun run test/parity_salesDrop
 - `salesDropDiagnosis`
 - `listTables`, `describeTable` and `executeSql` when the workspace enables `sql`
 - `writeSql` when the workspace enables `sqlWrite`
-- `listWorkspaces` on multi-workspace frontends
+- `listWorkspaces` on every frontend that passes a workspace directory
 
 ## The SQL tools
 
@@ -212,6 +213,7 @@ parsing is defeated by functions and `DO` blocks and is never a security boundar
 here. Errors are reduced to the Postgres `code`, `message` and `position`; driver
 errors, which carry the host and port, never reach the client.
 
-Each tool declares `access: "read" | "write"` and receives the client the frontend
-hands it. No tool opens, selects or reconfigures a connection, so read/write
-routing stays enforceable in one place in the frontend.
+Each tool has an `access` of `"read" | "write"` (absent means `"read"`) and
+receives the client the frontend hands it. No tool opens, selects or
+reconfigures a connection, so read/write routing stays enforceable in one place
+in the frontend.

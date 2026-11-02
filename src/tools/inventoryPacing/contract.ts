@@ -3,7 +3,7 @@
  */
 
 import { stringArgument } from "../../toolParams.ts";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import { loadInventoryPacing } from "./load.ts";
 import type { LoadInventoryPacingParams } from "./types.ts";
@@ -34,8 +34,8 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): Either.Either<LoadInventoryPacingParams, Error> {
-	return Either.gen(function* () {
+function parseParams(args: Record<string, unknown>): Result.Result<LoadInventoryPacingParams, Error> {
+	return Result.gen(function* () {
 		return {
 			stores: yield* stringArgument(args["stores"], "stores"),
 			velocityDays: num(args["velocityDays"]),
@@ -62,5 +62,5 @@ export const inventoryPacingTool = {
 		"than the stock supports. Never add stock across those marketplaces.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
-		Effect.flatMap(parseParams(args), (params) => loadInventoryPacing(params, sql)),
+		Effect.flatMap(Effect.fromResult(parseParams(args)), (params) => loadInventoryPacing(params, sql)),
 };

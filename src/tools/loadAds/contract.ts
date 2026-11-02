@@ -6,7 +6,7 @@
  */
 
 import { stringArgument } from "../../toolParams.ts";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import { loadAds, type LoadAdsParams, VALID_GROUP_BY, VALID_TIME_UNITS } from "./loadAds.ts";
 
@@ -64,8 +64,8 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): Either.Either<LoadAdsParams, Error> {
-	return Either.gen(function* () {
+function parseParams(args: Record<string, unknown>): Result.Result<LoadAdsParams, Error> {
+	return Result.gen(function* () {
 		return {
 			stores: yield* stringArgument(args["stores"], "stores"),
 			when: yield* stringArgument(args["when"], "when"),
@@ -95,5 +95,5 @@ export const loadAdsTool = {
 		"whatever the window, or null when they have none.",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
-		Effect.flatMap(parseParams(args), (params) => loadAds(params, sql)),
+		Effect.flatMap(Effect.fromResult(parseParams(args)), (params) => loadAds(params, sql)),
 };

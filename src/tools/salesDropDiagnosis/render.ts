@@ -3,7 +3,7 @@
  * the agency repo `lib/reports/salesDropDiagnosis/render.ts`.
  */
 
-import { Either } from "effect";
+import { Result } from "effect";
 import { tryOrOperationError } from "../../effectErrors.ts";
 import type { DropCause, OutputFormat, StoreDiagnosis } from "./types.ts";
 
@@ -54,7 +54,7 @@ function renderStoreText(d: StoreDiagnosis): string[] {
 	return lines;
 }
 
-export function render(rows: StoreDiagnosis[], format: OutputFormat): Either.Either<void, Error> {
+export function render(rows: StoreDiagnosis[], format: OutputFormat): Result.Result<void, Error> {
 	return tryOrOperationError(() => {
 		if (format === "json") {
 			console.log(JSON.stringify(rows, null, "\t"));

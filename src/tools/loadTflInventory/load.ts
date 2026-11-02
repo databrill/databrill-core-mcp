@@ -8,7 +8,7 @@
  * durable product dimension and product-id-based SKU mappings.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import { tryOrOperationError, tryPromiseOrOperationError } from "../../effectErrors.ts";
 import type { Sql } from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
@@ -32,41 +32,41 @@ function optionalTokens(value: string | undefined): readonly string[] | null {
 	return tokens.length > 0 ? tokens : null;
 }
 
-function parseDate(value: string | undefined): Either.Either<string | null, Error> {
-	return Either.gen(function* () {
+function parseDate(value: string | undefined): Result.Result<string | null, Error> {
+	return Result.gen(function* () {
 		if (value === undefined || value === "") {
 			return null;
 		}
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-			return yield* Either.left(new Error("asOf must be a calendar date in YYYY-MM-DD format"));
+			return yield* Result.fail(new Error("asOf must be a calendar date in YYYY-MM-DD format"));
 		}
 		return value;
 	});
 }
 
-function parseLimit(value: number | undefined): Either.Either<number, Error> {
-	return Either.gen(function* () {
+function parseLimit(value: number | undefined): Result.Result<number, Error> {
+	return Result.gen(function* () {
 		const limit = value ?? DEFAULT_LIMIT;
 		if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
-			return yield* Either.left(new Error(`limit must be an integer from 1 to ${MAX_LIMIT}`));
+			return yield* Result.fail(new Error(`limit must be an integer from 1 to ${MAX_LIMIT}`));
 		}
 		return limit;
 	});
 }
 
-function parseMaxAvailable(value: number | undefined): Either.Either<number | null, Error> {
-	return Either.gen(function* () {
+function parseMaxAvailable(value: number | undefined): Result.Result<number | null, Error> {
+	return Result.gen(function* () {
 		if (value === undefined) {
 			return null;
 		}
 		if (!Number.isFinite(value)) {
-			return yield* Either.left(new Error("maxAvailable must be a finite number"));
+			return yield* Result.fail(new Error("maxAvailable must be a finite number"));
 		}
 		return value;
 	});
 }
 
-function parseSkus(value: unknown): Either.Either<readonly TflSkuMapping[], Error> {
+function parseSkus(value: unknown): Result.Result<readonly TflSkuMapping[], Error> {
 	return tryOrOperationError(() => {
 		if (!Array.isArray(value)) {
 			return [];
@@ -114,11 +114,11 @@ export function loadTflInventory(
 	sql: Sql,
 ): Effect.Effect<LoadTflInventoryResult, Error> {
 	return Effect.gen(function* () {
-		const asOf = yield* parseDate(params.asOf);
+		const asOf = yield* Effect.fromResult(parseDate(params.asOf));
 		const products = optionalTokens(params.products);
 		const warehouses = optionalTokens(params.warehouses);
-		const maxAvailable = yield* parseMaxAvailable(params.maxAvailable);
-		const limit = yield* parseLimit(params.limit);
+		const maxAvailable = yield* Effect.fromResult(parseMaxAvailable(params.maxAvailable));
+		const limit = yield* Effect.fromResult(parseLimit(params.limit));
 
 		const presentRows = yield* tryPromiseOrOperationError(() =>
 			sql<Array<{ readonly tableName: string }>>`
@@ -251,9 +251,9 @@ export function loadTflInventory(
 		);
 
 		const isTruncated = rows.length > limit;
-		const data: TflInventoryRow[] = yield* Either.all(
+		const data: TflInventoryRow[] = yield* Effect.fromResult(Result.all(
 			rows.slice(0, limit).map((row) =>
-				Either.gen(function* () {
+				Result.gen(function* () {
 					return {
 						snapshotDate: row.snapshotDate,
 						connectorId: row.connectorId,
@@ -268,7 +268,7 @@ export function loadTflInventory(
 					};
 				})
 			),
-		);
+		));
 
 		const snapshotDates = [...new Map(
 			data.map((row) => [row.connectorId, { connectorId: row.connectorId, snapshotDate: row.snapshotDate }]),

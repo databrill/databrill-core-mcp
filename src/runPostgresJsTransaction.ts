@@ -1,5 +1,6 @@
-import { Cause, Effect, Exit, Runtime } from "effect";
+import { Cause, Effect, Exit } from "effect";
 import type { Sql, TransactionSql } from "postgres";
+import { causeToRejection, causeWithoutInterrupts, combineCauses } from "./effectCompat.ts";
 import { exitValue, toError, tryOrOperationError } from "./effectErrors.ts";
 
 /**
@@ -31,11 +32,11 @@ export function runPostgresJsTransaction<A, E, R>(
 ): Effect.Effect<A, E | Error, R> {
 	return Effect.uninterruptibleMask((restore) =>
 		Effect.gen(function* () {
-			const runtime = yield* Effect.runtime<R>();
+			const context = yield* Effect.context<R>();
 			let driverFailure: Error | undefined;
 			let callbackFailure: Cause.Cause<E | Error> | undefined;
 			let cancelled = false;
-			const operation = Effect.async<A, E | Error>((resume, signal) => {
+			const operation = Effect.callback<A, E | Error>((resume, signal) => {
 				let callbackRejection: unknown;
 				let callbackFinished: Promise<void> | undefined;
 				let callbackSettled = false;
@@ -44,18 +45,19 @@ export function runPostgresJsTransaction<A, E, R>(
 				// Promise.resolve captures a synchronous sql.begin invocation throw as well.
 				const finished = Promise.resolve().then(() =>
 					sql.begin(mode, (tx) => {
-						const callback = Runtime.runPromiseExit(runtime)(
+						const callback = Effect.runPromiseExitWith(context)(
 							Effect.interruptible(
-								Effect.flatMap(tryOrOperationError(() => body(tx)), (effect) => effect),
+								Effect.flatMap(
+									Effect.fromResult(tryOrOperationError(() => body(tx))),
+									(effect) => effect,
+								),
 							),
 							{ signal: callbackSignal },
 						).then((result) => {
 							callbackSettled = true;
 							if (Exit.isFailure(result)) {
 								callbackFailure = result.cause;
-								callbackRejection = result.cause._tag === "Fail"
-									? result.cause.error
-									: Runtime.makeFiberFailure(result.cause);
+								callbackRejection = causeToRejection(result.cause);
 								throw callbackRejection;
 							}
 							// Box the value so postgres.js's UnwrapPromiseArray type preserves A.
@@ -81,25 +83,25 @@ export function runPostgresJsTransaction<A, E, R>(
 						}
 						resume(
 							driverFailedFirst
-								? Effect.failCause(Cause.sequential(
+								? Effect.failCause(combineCauses(
 									Cause.fail(toError(error)),
 									callbackFailure === undefined
 										? Cause.empty
-										: Cause.filter(callbackFailure, (part) => part._tag !== "Interrupt"),
+										: causeWithoutInterrupts(callbackFailure),
 								))
 								: callbackFailure === undefined
 								? Effect.fail(toError(error))
 								: Effect.failCause(
 									error === callbackRejection
 										? callbackFailure
-										: Cause.sequential(callbackFailure, Cause.fail(toError(error))),
+										: combineCauses(callbackFailure, Cause.fail(toError(error))),
 								),
 						);
 					},
 				);
 				// postgres.js has no AbortSignal API here. Interrupt the owned callback through
 				// the signal, then wait for postgres.js to finish ROLLBACK before release.
-				return Effect.zipRight(
+				return Effect.andThen(
 					Effect.sync(() => {
 						cancelled = true;
 					}),
@@ -110,10 +112,10 @@ export function runPostgresJsTransaction<A, E, R>(
 			if (Exit.isFailure(result) && cancelled) {
 				let cause = result.cause;
 				if (callbackFailure !== undefined) {
-					cause = Cause.sequential(cause, Cause.filter(callbackFailure, (part) => part._tag !== "Interrupt"));
+					cause = combineCauses(cause, causeWithoutInterrupts(callbackFailure));
 				}
 				if (driverFailure !== undefined) {
-					cause = Cause.sequential(cause, Cause.fail(driverFailure));
+					cause = combineCauses(cause, Cause.fail(driverFailure));
 				}
 				return yield* Effect.failCause(cause);
 			}

@@ -18,7 +18,7 @@
  * enforceable; four tools each choosing for themselves would not be.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import type { McpToolHooks } from "../../toolHooks.ts";
 import {
@@ -48,8 +48,8 @@ import type { ExecuteSqlParams, ExecuteSqlResult } from "./types.ts";
  * Exported for `tests/unit/sqlGuardrails.test.ts`, which checks the reserve against
  * the envelope this tool really produces. Nothing else calls it.
  */
-export function envelopeReserveBytes(rowLimit: number): Either.Either<number, Error> {
-	return Either.gen(function* () {
+export function envelopeReserveBytes(rowLimit: number): Result.Result<number, Error> {
+	return Result.gen(function* () {
 		const shape: RowBudget = { rowLimit, byteLimit: MAX_RESULT_BYTES, envelopeReserveBytes: 0 };
 		const states: readonly (TruncationCap | null)[] = [null, "rows", "bytes"];
 		let reserve = 0;
@@ -82,12 +82,12 @@ export function executeSql(
 	hooks?: McpToolHooks,
 ): Effect.Effect<ExecuteSqlResult, Error> {
 	return Effect.gen(function* () {
-		const statement = yield* trimStatement(params.sql);
-		const rowLimit = yield* parseRowLimit(params.limit);
+		const statement = yield* Effect.fromResult(trimStatement(params.sql));
+		const rowLimit = yield* Effect.fromResult(parseRowLimit(params.limit));
 		const budget: RowBudget = {
 			rowLimit,
 			byteLimit: MAX_RESULT_BYTES,
-			envelopeReserveBytes: yield* envelopeReserveBytes(rowLimit),
+			envelopeReserveBytes: yield* Effect.fromResult(envelopeReserveBytes(rowLimit)),
 		};
 
 		const execution = yield* runReadStatement(sql, statement, budget, hooks);

@@ -20,7 +20,7 @@
  * a plain `await sql.unsafe(text)` would silently reopen the trap.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import { tryOrOperationError, tryPromiseOrOperationError } from "./effectErrors.ts";
 import { runPostgresJsTransaction } from "./runPostgresJsTransaction.ts";
 import type { Sql, TransactionSql } from "postgres";
@@ -129,10 +129,10 @@ interface WriteExecution {
 interface RowAccumulator {
 	/**
 	 * Measure and retain rows from a cursor chunk. Fails if a row cannot be JSON-encoded.
-	 * A reached cap returns Right(false), not an error. Write callers must still drain
+	 * A reached cap succeeds with false, not an error. Write callers must still drain
 	 * the cursor so the complete statement executes.
 	 */
-	readonly add: (chunk: readonly SqlRow[]) => Either.Either<boolean, Error>;
+	readonly add: (chunk: readonly SqlRow[]) => Result.Result<boolean, Error>;
 	readonly rows: () => readonly SqlRow[];
 	readonly truncatedBy: () => TruncationCap | null;
 }
@@ -167,8 +167,8 @@ export function isToolHookError(err: unknown): err is ToolHookError {
 	return err instanceof Error && fieldOf(err, "_tag") === TOOL_HOOK_ERROR_TAG;
 }
 
-function fail(message: string): Either.Either<never, Error> {
-	return Either.left(new Error(message));
+function fail(message: string): Result.Result<never, Error> {
+	return Result.fail(new Error(message));
 }
 
 /** Read one property off a value of unknown shape without a type assertion. */
@@ -195,13 +195,13 @@ const encoder = new TextEncoder();
  * every response, whose reader is a language model; `bin/cli.ts` still prints
  * tab-indented JSON for the human case.
  */
-export function encodeToolResult(result: unknown): Either.Either<string, Error> {
+export function encodeToolResult(result: unknown): Result.Result<string, Error> {
 	return tryOrOperationError(() => JSON.stringify(result));
 }
 
 /** UTF-8 byte length of the text `encodeToolResult` produces. */
-export function encodedByteLength(result: unknown): Either.Either<number, Error> {
-	return Either.map(encodeToolResult(result), (text) => encoder.encode(text).length);
+export function encodedByteLength(result: unknown): Result.Result<number, Error> {
+	return Result.map(encodeToolResult(result), (text) => encoder.encode(text).length);
 }
 
 /**
@@ -209,7 +209,7 @@ export function encodedByteLength(result: unknown): Either.Either<number, Error>
  * the number `createRowAccumulator` sums, and it is `encodeToolResult` applied to
  * the row rather than a second stringify that could drift from it.
  */
-export function serializedByteLength(row: SqlRow): Either.Either<number, Error> {
+export function serializedByteLength(row: SqlRow): Result.Result<number, Error> {
 	return encodedByteLength(row);
 }
 
@@ -228,7 +228,7 @@ export function serializedByteLength(row: SqlRow): Either.Either<number, Error> 
  * `rowsAffected` and `returnedRowCount` rather than `executeSql`'s fields, and it
  * has to compute its own reserve from this function rather than a second rule.
  */
-export function envelopeByteLength(meta: object): Either.Either<number, Error> {
+export function envelopeByteLength(meta: object): Result.Result<number, Error> {
 	return encodedByteLength({ meta, data: [] });
 }
 
@@ -237,8 +237,8 @@ export function envelopeByteLength(meta: object): Either.Either<number, Error> {
  * with a message naming the maximum rather than silently clamped, so an agent
  * learns the ceiling instead of receiving less than it asked for with no warning.
  */
-export function parseRowLimit(value: number | undefined): Either.Either<number, Error> {
-	return Either.gen(function* () {
+export function parseRowLimit(value: number | undefined): Result.Result<number, Error> {
+	return Result.gen(function* () {
 		if (value === undefined) {
 			return DEFAULT_ROW_LIMIT;
 		}
@@ -255,8 +255,8 @@ export function parseRowLimit(value: number | undefined): Either.Either<number, 
 }
 
 /** Trim surrounding whitespace and reject a missing or blank statement. Does not parse SQL. */
-export function trimStatement(value: string | undefined): Either.Either<string, Error> {
-	return Either.gen(function* () {
+export function trimStatement(value: string | undefined): Result.Result<string, Error> {
+	return Result.gen(function* () {
 		const statement = value?.trim() ?? "";
 		if (statement === "") {
 			return yield* fail("sql is required and must be a non-empty SQL statement");
@@ -285,7 +285,7 @@ export function createRowAccumulator(budget: RowBudget): RowAccumulator {
 
 	return {
 		add(chunk) {
-			return Either.gen(function* () {
+			return Result.gen(function* () {
 				if (truncatedBy !== null) {
 					return false;
 				}
@@ -420,8 +420,8 @@ export function formatSqlError(info: SqlErrorInfo): string {
 }
 
 /** Rethrow any database failure as a redacted, actionable error. */
-export function rethrowRedacted(err: unknown): Either.Either<never, Error> {
-	return Either.left(redactedError(err));
+export function rethrowRedacted(err: unknown): Result.Result<never, Error> {
+	return Result.fail(redactedError(err));
 }
 
 function redactedError(err: unknown): Error {
@@ -433,8 +433,8 @@ function redactedError(err: unknown): Error {
  * interpolated because Postgres does not accept a bind parameter in `SET`; it is
  * a module constant re-validated here, never anything a caller supplied.
  */
-export function statementTimeoutStatement(): Either.Either<string, Error> {
-	return Either.gen(function* () {
+export function statementTimeoutStatement(): Result.Result<string, Error> {
+	return Result.gen(function* () {
 		if (!Number.isInteger(STATEMENT_TIMEOUT_MS) || STATEMENT_TIMEOUT_MS <= 0) {
 			return yield* fail("statement timeout must be a positive whole number of milliseconds");
 		}
@@ -463,7 +463,7 @@ function assertIdentity(tx: TransactionSql, hooks: McpToolHooks | undefined): Ef
 	if (hook === undefined) {
 		return Effect.void;
 	}
-	return Effect.flatMap(tryOrOperationError(() => hook(tx)), (effect) => effect).pipe(
+	return Effect.flatMap(Effect.fromResult(tryOrOperationError(() => hook(tx))), (effect) => effect).pipe(
 		Effect.mapError((err) => {
 			const isDriverShaped = typeof fieldOf(err, "code") === "string";
 			return Object.assign(toolHookError(!isDriverShaped ? err.message : formatSqlError(describeSqlError(err))), {
@@ -491,7 +491,7 @@ export function withReadTransaction<T, E, R>(
 	return runPostgresJsTransaction(sql, "read only", (tx) =>
 		Effect.gen(function* () {
 			yield* assertIdentity(tx, hooks);
-			yield* executeUnit(tx, yield* statementTimeoutStatement());
+			yield* executeUnit(tx, yield* Effect.fromResult(statementTimeoutStatement()));
 			return yield* body(tx);
 		})).pipe(Effect.mapError(redactedError));
 }
@@ -569,7 +569,7 @@ export function runReadStatement(
 			const final = yield* tryPromiseOrOperationError(() =>
 				tx.unsafe<SqlRow[]>(statement).cursor(CURSOR_CHUNK_ROWS, (chunk) => {
 					delivered = chunk;
-					if (Either.getOrThrowWith(accumulator.add(chunk), (error) => error)) {
+					if (Result.getOrThrowWith(accumulator.add(chunk), (error) => error)) {
 						return undefined;
 					}
 					stopped = true;
@@ -596,7 +596,7 @@ export function runReadStatement(
 			// straight onto the rows array, so both caps — and any whole-payload accounting
 			// the accumulator grows later — apply to it exactly as they do to the rest.
 			if (!stopped) {
-				yield* accumulator.add(residualRows(final, delivered));
+				yield* Effect.fromResult(accumulator.add(residualRows(final, delivered)));
 			}
 			return { command: commandTag(final), rows: accumulator.rows(), truncatedBy: accumulator.truncatedBy() };
 		}));
@@ -654,7 +654,7 @@ export function runWriteStatement(
 			// transaction has run a query, and the identity assertion is a query.
 			yield* executeUnit(tx, "SET TRANSACTION READ WRITE");
 			yield* assertIdentity(tx, hooks);
-			yield* executeUnit(tx, yield* statementTimeoutStatement());
+			yield* executeUnit(tx, yield* Effect.fromResult(statementTimeoutStatement()));
 			const accumulator = createRowAccumulator(budget);
 			let delivered: readonly SqlRow[] | null = null;
 			let rowsSeen = 0;
@@ -675,7 +675,7 @@ export function runWriteStatement(
 					// drains, the statement completes and commits exactly once, and the rows
 					// past the cap cost only the chunk they arrived in. `add`'s `false` is
 					// ignored deliberately: it says "stop KEEPING", not "stop reading".
-					Either.getOrThrowWith(accumulator.add(chunk), (error) => error);
+					Result.getOrThrowWith(accumulator.add(chunk), (error) => error);
 					return undefined;
 				})
 			);
@@ -691,7 +691,7 @@ export function runWriteStatement(
 			// here, and the accumulator refuses rows past its cap by itself.
 			const residual = residualRows(result, delivered);
 			rowsSeen += residual.length;
-			yield* accumulator.add(residual);
+			yield* Effect.fromResult(accumulator.add(residual));
 			return {
 				command: result.command,
 				rowsAffected: rowsAffected(result.count, rowsSeen),

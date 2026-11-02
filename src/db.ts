@@ -1,4 +1,4 @@
-import { Either } from "effect";
+import { Result, Semaphore } from "effect";
 /**
  * Connection helper. The tool logic never opens a connection itself — a `sql`
  * is injected by the frontend (CLI / stdio / hosted), so the same loaders run
@@ -18,12 +18,13 @@ import { Either } from "effect";
 
 import { makePostgresJsTypes } from "@jsr/databrill__core-pg-kysely/canonical";
 import { Cause, Effect, Exit, type Scope } from "effect";
+import { causeIsEmpty, combineCauses } from "./effectCompat.ts";
 import { tryOrOperationError, tryPromiseOrOperationError } from "./effectErrors.ts";
 import postgres, { type Sql } from "postgres";
 import { type Config, resolveWorkspace } from "./config.ts";
 
 /** Construct a postgres client synchronously; connection I/O begins with its first query. */
-export function getSql(connectionString: string): Either.Either<Sql, Error> {
+export function getSql(connectionString: string): Result.Result<Sql, Error> {
 	return tryOrOperationError(() =>
 		postgres(connectionString, {
 			max: 5,
@@ -48,7 +49,7 @@ export interface SqlProvider {
  */
 export function createSqlProvider(config: Config): SqlProvider {
 	const pools = new Map<string, Sql>();
-	const ownership = Effect.unsafeMakeSemaphore(1);
+	const ownership = Semaphore.makeUnsafe(1);
 	let closing: Effect.Effect<void, Error> | undefined;
 
 	function endAll(): Effect.Effect<void, Error> {
@@ -64,10 +65,10 @@ export function createSqlProvider(config: Config): SqlProvider {
 						if (Exit.isSuccess(result)) {
 							pools.delete(wsid);
 						} else {
-							failures = Cause.parallel(failures, result.cause);
+							failures = combineCauses(failures, result.cause);
 						}
 					}
-					if (!Cause.isEmpty(failures)) {
+					if (!causeIsEmpty(failures)) {
 						return yield* Effect.failCause(failures);
 					}
 				})),
@@ -86,11 +87,11 @@ export function createSqlProvider(config: Config): SqlProvider {
 					yield* closing;
 				}
 				return yield* ownership.withPermits(1)(Effect.uninterruptible(Effect.gen(function* () {
-					const ws = yield* resolveWorkspace(config, args);
+					const ws = yield* Effect.fromResult(resolveWorkspace(config, args));
 					let sql = pools.get(ws.wsid);
 					if (sql === undefined) {
 						// Hold ownership and defer interruption until the new handle is cached.
-						sql = yield* getSql(ws.database.postgresUrl);
+						sql = yield* Effect.fromResult(getSql(ws.database.postgresUrl));
 						pools.set(ws.wsid, sql);
 					}
 					return sql;

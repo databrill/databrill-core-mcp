@@ -7,7 +7,7 @@
  * zero and `source` is "missing".
  */
 
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 /** One ASIN's cost inputs as the caller passes them. A missing field counts as 0, and referralPct as 0.15. */
 const CostInputSchema = Schema.Struct({
@@ -20,9 +20,7 @@ const CostInputSchema = Schema.Struct({
 
 /** `perAsin` may be omitted, as when every ASIN takes `familyDefault`. */
 export const EconomicsInputSchema = Schema.Struct({
-	perAsin: Schema.optionalWith(Schema.Record({ key: Schema.String, value: CostInputSchema }), {
-		default: () => ({}),
-	}),
+	perAsin: Schema.Record(Schema.String, CostInputSchema).pipe(Schema.withDecodingDefaultType(Effect.succeed({}))),
 	familyDefault: Schema.optional(CostInputSchema),
 });
 

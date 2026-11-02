@@ -1,4 +1,4 @@
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import { tryOrOperationError } from "../../effectErrors.ts";
 import type postgres from "postgres";
 import { Schema } from "effect";
@@ -147,8 +147,8 @@ export class LoadAdsError extends Error {
 	}
 }
 
-function fail(msg: string): Either.Either<never, Error> {
-	return Either.left(new LoadAdsError(msg));
+function fail(msg: string): Result.Result<never, Error> {
+	return Result.fail(new LoadAdsError(msg));
 }
 
 // ---------------------------------------------------------------------------
@@ -247,15 +247,15 @@ export function resolveStores(spec: string, sql: postgres.Sql): Effect.Effect<Re
 				const merchantId = token.slice(0, dashIdx);
 				const scope = token.slice(dashIdx + 1);
 				if (!knownMerchantIds.has(merchantId)) {
-					return yield* fail(
+					return yield* Effect.fromResult(fail(
 						`Unknown merchant '${merchantId}' in store token '${token}'. Known merchants come from amazon_store.`,
-					);
+					));
 				}
 				const infos = resolveScope(scope);
 				if (infos.length === 0) {
-					return yield* fail(
+					return yield* Effect.fromResult(fail(
 						`Unknown store scope '${scope}' in token '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, or *.`,
-					);
+					));
 				}
 				const merchantName = merchantNameById.get(merchantId)!;
 				for (const info of infos) {
@@ -268,9 +268,9 @@ export function resolveStores(spec: string, sql: postgres.Sql): Effect.Effect<Re
 				// Bare scope -> every merchant selling in the resolved marketplace(s)
 				const infos = resolveScope(token);
 				if (infos.length === 0) {
-					return yield* fail(
+					return yield* Effect.fromResult(fail(
 						`Unknown store '${token}'. Valid: country codes, regions (na,eu,fe), marketplace IDs, '*', or '{merchantId}-{scope}'.`,
-					);
+					));
 				}
 				for (const info of infos) {
 					const ms = merchantsByMarketplace.get(info.marketplaceId) ?? [];
@@ -280,7 +280,9 @@ export function resolveStores(spec: string, sql: postgres.Sql): Effect.Effect<Re
 		}
 
 		if (result.length === 0) {
-			return yield* fail("No stores resolved (no active merchant sells in the requested marketplace[s])");
+			return yield* Effect.fromResult(
+				fail("No stores resolved (no active merchant sells in the requested marketplace[s])"),
+			);
 		}
 		return result;
 	});
@@ -317,7 +319,7 @@ function distinctMerchants(stores: ResolvedStore[]): ResolvedStore[] {
 // When Resolution
 // ---------------------------------------------------------------------------
 
-function addDurationDays(dateStr: string, dur: WhenAst_Duration, sign: 1 | -1): Either.Either<string, Error> {
+function addDurationDays(dateStr: string, dur: WhenAst_Duration, sign: 1 | -1): Result.Result<string, Error> {
 	return tryOrOperationError(() => {
 		const d = new Date(dateStr + "T00:00:00Z");
 		if (dur.years) d.setUTCFullYear(d.getUTCFullYear() + sign * dur.years);
@@ -334,10 +336,10 @@ function extractDate(node: { readonly date: string } | { readonly datetime: stri
 	return "date" in node ? node.date : node.datetime.slice(0, 10);
 }
 
-export function parseWhenRange(whenStr: string): Either.Either<ParsedWhenRange, Error> {
-	return Either.gen(function* () {
+export function parseWhenRange(whenStr: string): Result.Result<ParsedWhenRange, Error> {
+	return Result.gen(function* () {
 		const ast = yield* parseWhenAst(whenStr).pipe(
-			Either.mapLeft((cause) => Object.assign(new LoadAdsError(`Invalid when: ${cause.message}`), { cause })),
+			Result.mapError((cause) => Object.assign(new LoadAdsError(`Invalid when: ${cause.message}`), { cause })),
 		);
 
 		switch (ast._tag) {
@@ -375,8 +377,8 @@ export function parseWhenRange(whenStr: string): Either.Either<ParsedWhenRange, 
 }
 
 /** Resolve a bare duration against a source-specific inclusive end date. */
-export function resolveTrailingRange(duration: WhenAst_Duration, dateLast: string): Either.Either<DateRange, Error> {
-	return Either.gen(function* () {
+export function resolveTrailingRange(duration: WhenAst_Duration, dateLast: string): Result.Result<DateRange, Error> {
+	return Result.gen(function* () {
 		return { dateFirst: yield* addDurationDays(dateLast, duration, -1), dateLast };
 	});
 }
@@ -386,7 +388,7 @@ export function resolveWhen(
 	sql: postgres.Sql,
 ): Effect.Effect<DateRange, Error> {
 	return Effect.gen(function* () {
-		const request = yield* parseWhenRange(whenStr);
+		const request = yield* Effect.fromResult(parseWhenRange(whenStr));
 		if (request.kind === "explicit") {
 			return request.range;
 		}
@@ -407,8 +409,8 @@ export function resolveWhen(
 					.compile(),
 		);
 		const latest = latestRow[0]?.latest;
-		if (!latest) return yield* fail("No ad data found in database");
-		return (yield* resolveTrailingRange(request.duration, latest));
+		if (!latest) return yield* Effect.fromResult(fail("No ad data found in database"));
+		return (yield* Effect.fromResult(resolveTrailingRange(request.duration, latest)));
 	});
 }
 
@@ -489,8 +491,8 @@ function probeFamilyTable(db: CanonicalDb, sql: postgres.Sql): Effect.Effect<boo
 // Filter Parsing
 // ---------------------------------------------------------------------------
 
-function parseFilter(filterStr: string): Either.Either<FilterExpr, Error> {
-	return Either.gen(function* () {
+function parseFilter(filterStr: string): Result.Result<FilterExpr, Error> {
+	return Result.gen(function* () {
 		const parts = filterStr.split(":");
 		if (parts.length < 3) return yield* fail(`Invalid filter format: '${filterStr}'. Expected 'field:op:value'`);
 		const field = parts[0];
@@ -752,8 +754,8 @@ function caseOverRef(
 	rows: readonly ResolvedStore[],
 	match: (store: ResolvedStore) => string,
 	label: (store: ResolvedStore) => string,
-): Either.Either<DimExpression<string | null>, Error> {
-	return Either.gen(function* () {
+): Result.Result<DimExpression<string | null>, Error> {
+	return Result.gen(function* () {
 		const first = rows[0];
 		// `resolveStores` fails rather than returning an empty list, so this is
 		// unreachable; the string-built version emitted `CASE  END`, a syntax error.
@@ -780,8 +782,8 @@ function buildDimExprs(
 	stores: ResolvedStore[],
 	resolvedAsin: RawBuilder<string>,
 	familyTable: boolean,
-): Either.Either<DimExprs, Error> {
-	return Either.gen(function* () {
+): Result.Result<DimExprs, Error> {
+	return Result.gen(function* () {
 		const selectExprs: AliasedExpression<unknown, string>[] = [];
 		const groupBy: GroupByEntry[] = [];
 
@@ -914,8 +916,8 @@ function buildDimExprs(
 // `currency` and `marketplaceId` both come from the static `amazonConstants` marketplace
 // table, never from the DB or from caller text. They were interpolated as quoted SQL
 // literals and are now bound, which is strictly safer; neither form reaches a GROUP BY.
-function currencyCaseExpr(stores: ResolvedStore[]): Either.Either<AliasedExpression<string | null, string>, Error> {
-	return Either.gen(function* () {
+function currencyCaseExpr(stores: ResolvedStore[]): Result.Result<AliasedExpression<string | null, string>, Error> {
+	return Result.gen(function* () {
 		const currencies = new Set(stores.map((s) => s.currency));
 		if (currencies.size <= 1) {
 			const only = stores[0]?.currency ?? "";
@@ -1037,7 +1039,7 @@ function buildQuery1(
 	filter: FilterExpr | null,
 	familyTable: boolean,
 ) {
-	return Either.gen(function* () {
+	return Result.gen(function* () {
 		const plan = dimPlan(dims);
 		// One expression object, reused in the SELECT list, the GROUP BY, the two
 		// optional joins and the `--products` predicate: identical text everywhere.
@@ -1161,7 +1163,7 @@ function buildQuery2(
 	filter: FilterExpr | null,
 	familyTable: boolean,
 ) {
-	return Either.gen(function* () {
+	return Result.gen(function* () {
 		// For halo-in, the ASIN is convertedProductId (which product received the halo).
 		// We still need sb_asin_lookup for dimensions that depend on the advertised product.
 		const plan = dimPlan(dims);
@@ -1435,9 +1437,9 @@ export function loadAds(
 ): Effect.Effect<LoadAdsResult, Error> {
 	return Effect.gen(function* () {
 		// Validate required fields
-		if (!params.stores) return yield* fail("stores is required");
-		if (!params.when) return yield* fail("when is required");
-		if (!params.groupBy) return yield* fail("groupBy is required");
+		if (!params.stores) return yield* Effect.fromResult(fail("stores is required"));
+		if (!params.when) return yield* Effect.fromResult(fail("when is required"));
+		if (!params.groupBy) return yield* Effect.fromResult(fail("groupBy is required"));
 
 		// One builder for the whole invocation, built before anything is assembled: it
 		// is where a future `.withSchema(workspaceSchema)` would attach.
@@ -1450,7 +1452,9 @@ export function loadAds(
 		const groupByDims = params.groupBy.split(",").map((s) => s.trim()) as GroupByDim[];
 		for (const dim of groupByDims) {
 			if (!VALID_GROUP_BY.includes(dim)) {
-				return yield* fail(`Unknown groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`);
+				return yield* Effect.fromResult(
+					fail(`Unknown groupBy dimension '${dim}'. Valid: ${VALID_GROUP_BY.join(", ")}`),
+				);
 			}
 		}
 
@@ -1459,7 +1463,9 @@ export function loadAds(
 		if (params.timeUnit) {
 			const tu = params.timeUnit.toUpperCase() as TimeUnit;
 			if (!VALID_TIME_UNITS.includes(tu)) {
-				return yield* fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`);
+				return yield* Effect.fromResult(
+					fail(`Unknown timeUnit '${params.timeUnit}'. Valid: ${VALID_TIME_UNITS.join(", ")}`),
+				);
 			}
 			timeUnit = tu;
 		}
@@ -1467,7 +1473,7 @@ export function loadAds(
 		// Parse filter
 		let filter: FilterExpr | null = null;
 		if (params.filter) {
-			filter = yield* parseFilter(params.filter);
+			filter = yield* Effect.fromResult(parseFilter(params.filter));
 		}
 
 		const derived = params.derived ?? false;
@@ -1481,7 +1487,7 @@ export function loadAds(
 		if (params.products) {
 			productAsins = yield* resolveProducts(params.products, sql);
 			if (productAsins.length === 0) {
-				return yield* fail("products resolved to zero ASINs");
+				return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 			}
 		}
 
@@ -1512,11 +1518,15 @@ export function loadAds(
 		const [q1Rows, q2Rows] = yield* Effect.all([
 			runCompiled(
 				sql,
-				yield* buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+				yield* Effect.fromResult(
+					buildQuery1(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+				),
 			),
 			runCompiled(
 				sql,
-				yield* buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+				yield* Effect.fromResult(
+					buildQuery2(db, stores, range, groupByDims, timeUnit, productAsins, filter, familyTable),
+				),
 			),
 		], { concurrency: 2 });
 

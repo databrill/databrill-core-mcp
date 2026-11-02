@@ -1,6 +1,6 @@
 {
 	"name": "@databrill/core-mcp",
-	"version": "0.2.9",
+	"version": "0.2.10",
 	"type": "module",
 	"license": "Apache-2.0",
 	"description": "Databrill client-DB metric loaders + question tools, exposed as MCP tools and a CLI. Runs under bun and deno.",
@@ -18,20 +18,19 @@
 		"parity": "bun run test/parity_salesDropDiagnosis.ts"
 	},
 	"dependencies": {
-		"@effect/cli": "^0.75.0",
-		"@effect/platform": "^0.96.0",
-		"@effect/platform-node": "^0.106.0",
-		"@modelcontextprotocol/sdk": "^1.0.0",
-		"dotenv": "^16.4.5",
-		"effect": "3.21.2",
-		"kysely": "^0.29.0",
+		"@effect/platform-node": "4.0.6",
+		"@effect/platform-node-shared": "4.0.6",
+		"@modelcontextprotocol/sdk": "^1.32.2",
+		"dotenv": "^18.0.9",
+		"effect": "4.0.6",
+		"kysely": "^0.29.7",
 		"luxon": "^3.5.0",
 		"postgres": "^3.4.8",
-		"temporal-polyfill": "1.0.4",
+		"temporal-polyfill": "1.0.6",
 		"tinyduration": "^3.3.1",
-		"@jsr/databrill__core-pg-kysely": "^0.1.17"
+		"@jsr/databrill__core-pg-kysely": "^0.1.18"
 	},
 	"devDependencies": {
-		"@types/luxon": "^3.4.2"
+		"@types/luxon": "^3.7.6"
 	}
 }

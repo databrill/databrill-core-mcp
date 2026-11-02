@@ -16,7 +16,7 @@
  * department, which that table does not name, so its key is its `categoryName`.
  */
 
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
@@ -25,8 +25,8 @@ import { runCompiled } from "../../runCompiled.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import type { LoadRankParams, LoadRankResult, RankCategoryKind, RankPoint } from "./types.ts";
 
-function fail(msg: string): Either.Either<never, Error> {
-	return Either.left(new Error(msg));
+function fail(msg: string): Result.Result<never, Error> {
+	return Result.fail(new Error(msg));
 }
 
 /** A numeric browse-node key is a subcategory; any other key is a top-level department. */
@@ -36,8 +36,8 @@ function categoryKindOf(category: string): RankCategoryKind {
 
 export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effect<LoadRankResult, Error> {
 	return Effect.gen(function* () {
-		if (!params.stores) return yield* fail("stores is required");
-		if (!params.when) return yield* fail("when is required");
+		if (!params.stores) return yield* Effect.fromResult(fail("stores is required"));
+		if (!params.when) return yield* Effect.fromResult(fail("when is required"));
 
 		const stores = yield* resolveStores(params.stores, sql);
 		const countries = [...new Set(stores.map((s) => s.countryCode))]; // uppercase, e.g. DE
@@ -48,7 +48,7 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 		let asins: string[] | null = null;
 		if (params.products) {
 			asins = yield* resolveProducts(params.products, sql);
-			if (asins.length === 0) return yield* fail("products resolved to zero ASINs");
+			if (asins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 
 		// Which per-marketplace rank tables actually exist?
@@ -91,7 +91,7 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 			const marketplaceId = marketplaceIdByCountry.get(country) ?? country;
 			const tz = marketplaceIdToMarketplaceInfo[marketplaceId]?.timeZone;
 			if (tz === undefined) {
-				return yield* fail(`No time zone is known for marketplace ${marketplaceId}`);
+				return yield* Effect.fromResult(fail(`No time zone is known for marketplace ${marketplaceId}`));
 			}
 			present.push(country);
 

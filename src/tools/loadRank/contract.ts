@@ -4,7 +4,7 @@
  */
 
 import { stringArgument } from "../../toolParams.ts";
-import { Effect, Either } from "effect";
+import { Effect, Result } from "effect";
 import type { Sql } from "postgres";
 import { loadRank } from "./load.ts";
 import type { LoadRankParams } from "./types.ts";
@@ -35,8 +35,8 @@ const inputSchema = {
 	additionalProperties: false,
 } as const;
 
-function parseParams(args: Record<string, unknown>): Either.Either<LoadRankParams, Error> {
-	return Either.gen(function* () {
+function parseParams(args: Record<string, unknown>): Result.Result<LoadRankParams, Error> {
+	return Result.gen(function* () {
 		return {
 			stores: yield* stringArgument(args["stores"], "stores"),
 			when: yield* stringArgument(args["when"], "when"),
@@ -58,5 +58,5 @@ export const loadRankTool = {
 		"amazon_browse_node).",
 	inputSchema,
 	run: (args: Record<string, unknown>, sql: Sql) =>
-		Effect.flatMap(parseParams(args), (params) => loadRank(params, sql)),
+		Effect.flatMap(Effect.fromResult(parseParams(args)), (params) => loadRank(params, sql)),
 };
