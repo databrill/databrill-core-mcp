@@ -1,8 +1,9 @@
 /**
  * Mount every tool from the contract onto an MCP `Server`. This is the library
  * entry point: the stdio frontend (bin/stdio.ts) and the hosted frontend both
- * call this — they differ only in how `getSql` resolves the connection
- * (registry-selected local credential vs OAuth→wsid→pooled target DB).
+ * call this. They differ in how `getSql` resolves the connection
+ * (registry-selected local credential vs OAuth→wsid→pooled target DB), and the
+ * hosted frontend also supplies `submitFeedback`, bound to its verified user.
  *
  * When a `WorkspaceDirectory` is passed, each data tool gains a required `wsid`
  * argument (enum of the configured workspaces) and a `listWorkspaces` discovery
@@ -47,6 +48,34 @@ export type { McpToolAccess } from "./contract.ts";
 export type { McpToolHooks } from "./toolHooks.ts";
 
 const LIST_WORKSPACES = "listWorkspaces";
+/** Shared name for registration and hosted control-operation classification. */
+export const SUBMIT_FEEDBACK_TOOL = "submitFeedback";
+
+/** A hosted frontend binds the authenticated sender before exposing this capability. */
+export interface SubmitFeedback {
+	/** Longest message, after trimming, that the frontend's feedback command accepts. */
+	readonly maxMessageLength: number;
+	readonly submit: (message: string) => Effect.Effect<{ readonly feedbackId: string }, Error>;
+}
+
+const feedbackTool = (maxMessageLength: number) => ({
+	name: SUBMIT_FEEDBACK_TOOL,
+	description:
+		"Send feedback about DataBrill (an idea, or something that could work better) as the signed-in user. " +
+		"Submit only feedback the user asks to send. To get help with a problem, the user opens Contact support " +
+		"from Help in DataBrill.",
+	inputSchema: {
+		type: "object",
+		properties: {
+			message: {
+				type: "string",
+				description: `Feedback message, 1–${maxMessageLength} characters after trimming.`,
+			},
+		},
+		required: ["message"],
+		additionalProperties: false,
+	},
+});
 
 /** What a binding frontend needs to know about a tool BEFORE it dispatches the call. */
 export interface McpToolInfo {
@@ -84,6 +113,8 @@ function isSqlTool(tool: McpTool): boolean {
 }
 
 export interface RegisterToolsOptions {
+	/** Registers feedback without requiring a tenant SQL connection. */
+	readonly submitFeedback?: SubmitFeedback;
 	/** Directory exposed by `listWorkspaces` without adding workspace selection to data tools. */
 	readonly discoveryDirectory?: WorkspaceDirectory;
 	/** Feature flags for a workspace-scoped frontend with no directory. */
@@ -181,6 +212,9 @@ export function registerTools(
 							? withWsid(tool.inputSchema, eligibleWsids(tool, config))
 							: tool.inputSchema,
 					}));
+					if (options.submitFeedback) {
+						listed.push(feedbackTool(options.submitFeedback.maxMessageLength));
+					}
 					if (discoveryDirectory) {
 						listed.unshift({
 							name: LIST_WORKSPACES,
@@ -210,6 +244,28 @@ export function registerTools(
 				if (discoveryDirectory && req.params.name === LIST_WORKSPACES) {
 					const text = yield* Effect.fromResult(encodeToolResult(summarizeConfig(discoveryDirectory)));
 					return { content: [{ type: "text", text }] };
+				}
+
+				if (req.params.name === SUBMIT_FEEDBACK_TOOL && options.submitFeedback) {
+					const { maxMessageLength, submit } = options.submitFeedback;
+					return yield* Effect.gen(function* () {
+						const raw = args["message"];
+						if (
+							typeof raw !== "string" || raw.trim().length === 0 || raw.trim().length > maxMessageLength
+						) {
+							return yield* Effect.fail(
+								new Error(`Feedback must contain 1–${maxMessageLength} characters after trimming`),
+							);
+						}
+						const result = yield* submit(raw.trim());
+						const text = yield* Effect.fromResult(encodeToolResult(result));
+						return { content: [{ type: "text" as const, text }] };
+					}).pipe(Effect.catch((err) =>
+						Effect.succeed({
+							content: [{ type: "text" as const, text: `Error: ${err.message}` }],
+							isError: true,
+						})
+					));
 				}
 
 				const tool = tools.find((t) => t.name === req.params.name);

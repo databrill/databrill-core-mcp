@@ -88,7 +88,7 @@ The CLI and stdio programs finish with `Effect.scoped`; stdio acquires its serve
 scope, so server shutdown precedes pool teardown. Cleanup failures become defects and remain
 in the Cause alongside work failures and interruption.
 
-Effect is a public dependency pinned to 4.0.6. Consumers composing local package
+Effect is a public dependency pinned to 4.1.2. Consumers composing local package
 source must resolve the same Effect version: different versions have incompatible
 private iterator types. The database driver's own query objects and transaction
 callbacks retain their native contracts; owned tool programs remain Effects.
@@ -171,6 +171,10 @@ CLIENT=exampleclient AGENCY_REPO=~/src/agency-repo bun run test/parity_salesDrop
 - `listTables`, `describeTable` and `executeSql` when the workspace enables `sql`
 - `writeSql` when the workspace enables `sqlWrite`
 - `listWorkspaces` on every frontend that passes a workspace directory
+- `submitFeedback` on frontends that supply the authenticated feedback capability
+  to `registerTools`. The hosted MCP server supplies it; local stdio does not.
+  It accepts only a `message` and sends it as the signed-in user's feedback. A
+  problem that needs an answer goes to Contact support, under Help in DataBrill.
 
 ## The SQL tools
 

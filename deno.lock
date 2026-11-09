@@ -1,30 +1,30 @@
 {
   "version": "5",
   "specifiers": {
-    "npm:@effect/platform-node-shared@4.0.6": "4.0.6_effect@4.0.6",
-    "npm:@effect/platform-node@4.0.6": "4.0.6_effect@4.0.6_redis@6.3.1",
-    "npm:@jsr/databrill__core-pg-kysely@~0.1.18": "0.1.18",
+    "npm:@effect/platform-node-shared@4.1.2": "4.1.2_effect@4.1.2",
+    "npm:@effect/platform-node@4.1.2": "4.1.2_effect@4.1.2_redis@6.3.1",
+    "npm:@jsr/databrill__core-pg-kysely@~0.1.19": "0.1.19",
     "npm:@modelcontextprotocol/sdk@^1.32.2": "1.32.2_zod@4.6.7",
     "npm:@types/luxon@^3.7.6": "3.7.6",
     "npm:dotenv@^18.0.9": "18.0.9",
-    "npm:effect@4.0.6": "4.0.6",
-    "npm:kysely@~0.29.7": "0.29.8",
+    "npm:effect@4.1.2": "4.1.2",
+    "npm:kysely@~0.29.8": "0.29.8",
     "npm:luxon@^3.5.0": "3.7.2",
     "npm:postgres@^3.4.8": "3.4.9",
     "npm:temporal-polyfill@1.0.6": "1.0.6",
     "npm:tinyduration@^3.3.1": "3.4.1"
   },
   "npm": {
-    "@effect/platform-node-shared@4.0.6_effect@4.0.6": {
-      "integrity": "sha512-0PhyC4uG30xGtsajnxjkcBWfTjNRzUh4ZKl1Kvo/MNyCTb+W2O+fBzf7wCRCoqt+nLudiq4V7vX40Q8XIBuMaQ==",
+    "@effect/platform-node-shared@4.1.2_effect@4.1.2": {
+      "integrity": "sha512-wSwl9A/G1hcVvF8nLI+YfB3EyOIDvWS6+lsTZBkmgDnPBL7m8YWZF+1HD+mdEsb52SUGfukip46Q3gRwSdk3QA==",
       "dependencies": [
         "@types/ws",
         "effect",
         "ws"
       ]
     },
-    "@effect/platform-node@4.0.6_effect@4.0.6_redis@6.3.1": {
-      "integrity": "sha512-gXvGHAy0/8PZbWvMMguloDUyeSP+rzYEo3FSEqUuGduxo9ORcGioDxPI+GOLCIFfam7VuNkmSUxBOiRMIrMrBw==",
+    "@effect/platform-node@4.1.2_effect@4.1.2_redis@6.3.1": {
+      "integrity": "sha512-ye0UjxORdd5Qu3paZ1LljgGOALWHt7muP9VTpjUSCNfcesiB/Hm7wPJIvZeu4gnwpTe5BtEnO1VHngWqjJp8mA==",
       "dependencies": [
         "@effect/platform-node-shared",
         "effect",
@@ -38,14 +38,14 @@
         "hono"
       ]
     },
-    "@jsr/databrill__core-pg-kysely@0.1.18": {
-      "integrity": "sha512-QaZ2cxPjLzoe7NgopiSt4zJUNaG7QyCCjofGQsnipihFEIcMAyTJlt5julzfW7Nlm+tTjH+3I6AlQfRCtiP8eQ==",
+    "@jsr/databrill__core-pg-kysely@0.1.19": {
+      "integrity": "sha512-hySWU8q24bHEhuiwCDcMj80EymQFPi910qRsGou11iu36y6BhC6wdQkKnawwP4SMkNw1dFssC8J9Z4errDYXLA==",
       "dependencies": [
         "effect",
         "kysely",
         "pg"
       ],
-      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.18.tgz"
+      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.19.tgz"
     },
     "@modelcontextprotocol/sdk@1.32.2_zod@4.6.7": {
       "integrity": "sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==",
@@ -221,8 +221,8 @@
     "ee-first@1.1.1": {
       "integrity": "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="
     },
-    "effect@4.0.6": {
-      "integrity": "sha512-Tc3mkzuLR6t6P9dhLt0D2GrxYtmU5td4XEJEiXCmILz53IRIfJyHsKZWjTA3xEjiwpNTtXBgI4iqYPxMztBDrw=="
+    "effect@4.1.2": {
+      "integrity": "sha512-d3Oah1WyKxFLFh19yWheS5IXIVaITzxZ71JkE1rkUozq/6EcJSU5nPk5bF2QrSygZ3SQoiNQB8TsxFriyMeMaQ=="
     },
     "encodeurl@2.0.1": {
       "integrity": "sha512-Ev/hIyePLZtpL98x562lvPtenrUfGr0lfaf44HFZ+hDEwso7ccV9QAZrEVLg0hxNAzygaAFxy2dYaAKKM0G06A=="
@@ -687,8 +687,8 @@
     "undici-types@8.9.0": {
       "integrity": "sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg=="
     },
-    "undici@8.12.3": {
-      "integrity": "sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw=="
+    "undici@8.12.4": {
+      "integrity": "sha512-8Mx+uNKKER2bA4AdtedkqRbwUCIJFr2nJckXRe5yrDqzePqwLP7VNcctN8/XdmDSbF7mS+jJKIszlL+vbam1VA=="
     },
     "unpipe@1.0.0": {
       "integrity": "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ=="
@@ -725,14 +725,14 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
-        "npm:@effect/platform-node-shared@4.0.6",
-        "npm:@effect/platform-node@4.0.6",
-        "npm:@jsr/databrill__core-pg-kysely@~0.1.18",
+        "npm:@effect/platform-node-shared@4.1.2",
+        "npm:@effect/platform-node@4.1.2",
+        "npm:@jsr/databrill__core-pg-kysely@~0.1.19",
         "npm:@modelcontextprotocol/sdk@^1.32.2",
         "npm:@types/luxon@^3.7.6",
         "npm:dotenv@^18.0.9",
-        "npm:effect@4.0.6",
-        "npm:kysely@~0.29.7",
+        "npm:effect@4.1.2",
+        "npm:kysely@~0.29.8",
         "npm:luxon@^3.5.0",
         "npm:postgres@^3.4.8",
         "npm:temporal-polyfill@1.0.6",
