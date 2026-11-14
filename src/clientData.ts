@@ -190,13 +190,10 @@ function loadDailySalesBySite(sql: Sql, merchantIds: string[], since: string): E
 						eb.cast<string>(eb.ref("localdate"), "text").as("date"),
 						eb.ref("merchant_id").as("merchantId"),
 						eb.ref("marketplace_id").as("marketplaceId"),
-						eb.cast<string | null>(
-							eb.fn.sum<string | null>(
-								ksql<number>`${eb.ref("item_price")} - COALESCE(${
-									eb.ref("item_promotion_discount")
-								}, 0)`,
-							),
-							"numeric",
+						eb.fn.sum<string | null>(
+							ksql<string>`${eb.ref("item_price")}::numeric - COALESCE(${
+								eb.ref("item_promotion_discount")
+							}::numeric, 0)`,
 						).as("sales"),
 						eb.fn.max("currency").as("currency"),
 						eb.cast<number | null>(eb.fn.sum<string | null>("quantity"), "integer").as("units"),
@@ -241,13 +238,13 @@ function loadDailyAdBySite(sql: Sql, merchantIds: string[], since: string): Effe
 						eb.cast<string>(eb.ref("r.date"), "text").as("date"),
 						"r.merchantId",
 						"r.marketplaceId",
-						eb.cast<string | null>(eb.fn.sum<string | null>("r.totalCost"), "numeric").as("spend"),
+						eb.fn.sum<string | null>(eb.cast<string>(eb.ref("r.totalCost"), "numeric")).as("spend"),
 						eb.cast<number | null>(eb.fn.sum<string | null>("r.clicks"), "integer").as("clicks"),
 						eb.cast<number | null>(eb.fn.sum<string | null>("r.impressions"), "integer").as(
 							"impressions",
 						),
 						eb.cast<number | null>(eb.fn.sum<string | null>("r.purchases"), "integer").as("orders"),
-						eb.cast<string | null>(eb.fn.sum<string | null>("r.sales"), "numeric").as("adSales"),
+						eb.fn.sum<string | null>(eb.cast<string>(eb.ref("r.sales"), "numeric")).as("adSales"),
 					])
 					.where((eb) => eb("r.merchantId", "=", eb.fn.any(ksql.val(merchantIds))))
 					.where("r.date", ">=", isoDateParam(since))

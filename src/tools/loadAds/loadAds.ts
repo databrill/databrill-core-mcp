@@ -25,6 +25,7 @@ import {
 	SPONSORED_BRANDS,
 } from "../../kyselySbAggregateHasPerAsinTwin.ts";
 import { jsonbText } from "../../sqlJson.ts";
+import { makeCompositeKey } from "../../makeCompositeKey.ts";
 
 /**
  * The canonical query builder's own type, derived from its factory.
@@ -421,6 +422,7 @@ export function resolveWhen(
 export function resolveProducts(
 	productsStr: string,
 	sql: postgres.Sql,
+	options?: { readonly warnOnMissingFamily?: boolean },
 ): Effect.Effect<string[], Error> {
 	return Effect.gen(function* () {
 		const db = createCanonicalQueryBuilder();
@@ -459,7 +461,7 @@ export function resolveProducts(
 								.compile(),
 					)
 					: [];
-				if (rows.length === 0) {
+				if (rows.length === 0 && options?.warnOnMissingFamily !== false) {
 					console.error(`Warning: no ASINs found for family '${token}'`);
 				}
 				for (const row of rows) childAsins.add(row.asin);
@@ -682,7 +684,7 @@ function dimPlan(dims: GroupByDim[]): DimPlan {
 				outputCols.push("placement");
 				break;
 			case "target":
-				outputCols.push("target");
+				outputCols.push("target", "targetMatchType");
 				break;
 			case "adgroup":
 				outputCols.push("adGroupId");
@@ -712,10 +714,8 @@ function dimPlan(dims: GroupByDim[]): DimPlan {
  * exist on `amzadapi_reports_v1__search_asin_placement__byDay` and NOT on
  * `amzadapi_reports_v1__product01__byDay`, in the generated `DB` and in the
  * fixture schema alike. So one TYPED builder cannot serve both — `eb.ref("r.target")`
- * would not compile against the halo-in query. Today `--groupBy target` makes
- * query 2 fail at runtime, and that is existing behaviour which is preserved
- * here deliberately rather than fixed; `buildQuery2` leaves `placement` out of
- * its dimensions instead.
+ * would not compile against the halo-in query. `buildQuery2` leaves `placement`
+ * and `target` out of its dimensions and selects nulls for their output columns.
  *
  * The consequence, and it is worth stating rather than reading as an oversight:
  * every `r.` / `camp.` / `ad.` / `fam.` / `cat.` reference in the dimension
@@ -852,7 +852,9 @@ function buildDimExprs(
 					break;
 				case "target":
 					selectExprs.push(ksql.ref<string>("r.target").as("target"));
+					selectExprs.push(ksql.ref<string>("r.targetMatchType").as("targetMatchType"));
 					groupBy.push({ key: `r.target`, expr: ksql.ref("r.target") });
+					groupBy.push({ key: `r."targetMatchType"`, expr: ksql.ref("r.targetMatchType") });
 					break;
 				case "adgroup":
 					selectExprs.push(ksql.ref<string>("r.adGroupId").as("adGroupId"));
@@ -1064,9 +1066,10 @@ function buildQuery1(
 				eb.fn.sum<string | null>("r.addToCart").as("addToCart"),
 				eb.fn.sum<string | null>("r.purchases").as("purchases"),
 				eb.fn.sum<string | null>("r.unitsSold").as("units"),
-				// The cast is on the COLUMN, INSIDE the aggregate, as `SUM(r."totalCost"::float)`
-				// was: `cast(sum(...) as float8)` would add `numeric` exactly and round once,
-				// which is a different number in the last bits.
+				// The columns are DOUBLE PRECISION, so the cast changes nothing today. It stays on the
+				// COLUMN, INSIDE the aggregate, so the sum is float8 and typed `number` whatever the
+				// column's type: `cast(sum(...) as float8)` over a `numeric` column would add exactly
+				// and round once, which is a different number in the last bits.
 				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.totalCost"), "float8")).as("spend"),
 				eb.fn.sum<number | null>(eb.cast<number>(eb.ref("r.sales"), "float8")).as("revenue"),
 				// Halo-out metrics
@@ -1168,19 +1171,21 @@ function buildQuery2(
 		// We still need sb_asin_lookup for dimensions that depend on the advertised product.
 		const plan = dimPlan(dims);
 		const resolvedAsin = resolvedAsinExprProduct01();
-		// product01 has no placement column, so halo-in cannot be split by placement:
-		// this query groups without it and reports its rows under a NULL placement,
+		// product01 has neither placement nor target/match type, so halo-in cannot
+		// be split by them: group without them and report NULL dimension columns,
 		// which `mergeResults` keeps as their own output row.
 		const dims2 = yield* buildDimExprs(
-			dims.filter((dim) => dim !== "placement"),
+			dims.filter((dim) => dim !== "placement" && dim !== "target"),
 			stores,
 			resolvedAsin,
 			familyTable,
 		);
 		const currency = yield* currencyCaseExpr(stores);
 
-		const groupByCols: GroupByEntry[] = [];
-		if (distinctMarketplaces(stores).length > 1) groupByCols.push(marketplaceIdGroupBy());
+		// Keep a real grouping even for one marketplace: placement/target can remove
+		// every requested halo dimension. An empty GROUP BY is invalid, and an
+		// ungrouped aggregate would invent a zero halo row when no input rows match.
+		const groupByCols: GroupByEntry[] = [marketplaceIdGroupBy()];
 		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
 		groupByCols.push(...dims2.groupBy);
 
@@ -1190,6 +1195,9 @@ function buildQuery2(
 				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
 				...dims2.selectExprs,
 				...(dims.includes("placement") ? [ksql<null>`NULL`.as("placement")] : []),
+				...(dims.includes("target")
+					? [ksql<null>`NULL`.as("target"), ksql<null>`NULL`.as("targetMatchType")]
+					: []),
 				// Halo-in metrics
 				eb.fn.sum<string | null>("r.purchases").as("purchasesHaloIn"),
 				eb.fn.sum<string | null>("r.unitsSold").as("unitsHaloIn"),
@@ -1239,7 +1247,9 @@ function buildQuery2(
 // ---------------------------------------------------------------------------
 
 function buildMergeKey(row: Record<string, unknown>, keyCols: string[]): string {
-	return keyCols.map((c) => String(row[c] ?? "")).join("\t");
+	// A missing halo dimension must never merge into an actual empty report value.
+	// Tag every non-null value as well, so a literal "null" remains distinct.
+	return makeCompositeKey("loadAds", ...keyCols.map((c) => row[c] == null ? "null" : `value:${String(row[c])}`));
 }
 
 function mergeResults(
@@ -1474,6 +1484,11 @@ export function loadAds(
 		let filter: FilterExpr | null = null;
 		if (params.filter) {
 			filter = yield* Effect.fromResult(parseFilter(params.filter));
+		}
+		// Target cardinality can be large even for a short window. Require a filter
+		// applied to both metric queries rather than limiting rows after aggregation.
+		if (groupByDims.includes("target") && !params.products?.trim() && !filter) {
+			return yield* Effect.fromResult(fail("groupBy 'target' needs a products or campaignName filter"));
 		}
 
 		const derived = params.derived ?? false;

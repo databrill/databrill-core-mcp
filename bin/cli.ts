@@ -8,7 +8,6 @@
  */
 
 import "temporal-polyfill/global";
-import "dotenv/config";
 import packageJson from "../package.json" with { type: "json" };
 import { Command, Flag } from "effect/cli";
 import { NodeRuntime, NodeServices } from "@effect/platform-node";
@@ -21,6 +20,7 @@ import {
 	resolveWorkspace,
 	SQL_FEATURE,
 	SQL_WRITE_FEATURE,
+	summarizeConfig,
 	TFL_INVENTORY_FEATURE,
 	workspaceHasFeature,
 } from "../src/config.ts";
@@ -35,16 +35,20 @@ import { loadSqp } from "../src/tools/loadSqp/load.ts";
 import { loadRank } from "../src/tools/loadRank/load.ts";
 import { loadEconomics } from "../src/tools/loadEconomics/load.ts";
 import { loadInventoryPacing } from "../src/tools/inventoryPacing/load.ts";
+import { loadProductsTool } from "../src/tools/loadProducts/contract.ts";
+import { loadAmazonFbaStockouts } from "../src/tools/loadAmazonFbaStockouts/load.ts";
 import { loadTflInventory } from "../src/tools/loadTflInventory/load.ts";
 import { load } from "../src/tools/salesDropDiagnosis/load.ts";
 import { render } from "../src/tools/salesDropDiagnosis/render.ts";
+import { loadStartupEnv, packageRoot } from "../src/startup.ts";
 
 function printJson(result: unknown): Result.Result<void, Error> {
 	return tryOrOperationError(() => console.log(JSON.stringify(result, null, "\t")));
 }
 
 const program = Effect.gen(function* () {
-	const loadedConfig = yield* loadConfig();
+	yield* loadStartupEnv();
+	const loadedConfig = yield* loadConfig(undefined, { rootDir: packageRoot });
 	if (loadedConfig === null) {
 		return yield* Effect.fail(
 			new Error("DATABRILL_CONFIG is required; unscoped POSTGRES_URL mode is not supported"),
@@ -52,6 +56,12 @@ const program = Effect.gen(function* () {
 	}
 	const config = loadedConfig;
 	const provider = yield* acquireSqlProvider(config);
+
+	const listWorkspacesCommand = Command.make(
+		"listWorkspaces",
+		{},
+		() => Effect.fromResult(printJson(summarizeConfig(config))),
+	).pipe(Command.withDescription("List configured workspaces and merchants without connecting to a database"));
 
 	/** Shared required `--wsid` option. */
 	const wsidOption = Flag.String("wsid").pipe(
@@ -354,6 +364,90 @@ const program = Effect.gen(function* () {
 			}),
 	).pipe(Command.withDescription("Fetch the latest The Fulfillment Lab product-by-warehouse inventory snapshot"));
 
+	const loadAmazonFbaStockoutsCommand = Command.make(
+		"loadAmazonFbaStockouts",
+		{
+			wsid: wsidOption,
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("Country, region (na, eu, fe), marketplaceId, '*', or {merchantId}-{scope}"),
+			),
+			when: Flag.String("when").pipe(
+				Flag.withDescription(
+					"ISO interval, or a duration ending on the latest local today of the selected stores' marketplaces " +
+						"(default: the last 90 days)",
+				),
+				Flag.optional,
+			),
+			products: Flag.String("products").pipe(
+				Flag.withDescription(
+					"Child or parent ASINs, family names, FNSKUs or seller SKUs; every token is also matched as an " +
+						"FNSKU and as a seller SKU",
+				),
+				Flag.optional,
+			),
+			limit: Flag.Int("limit").pipe(
+				Flag.withDescription("Maximum episodes, 1-1000 (default 250)"),
+				Flag.optional,
+			),
+		},
+		(o) =>
+			Effect.gen(function* () {
+				const sql = yield* resolveSql(o);
+				const result = yield* loadAmazonFbaStockouts({
+					stores: o.stores,
+					when: Option.getOrUndefined(o.when),
+					products: Option.getOrUndefined(o.products),
+					limit: Option.getOrUndefined(o.limit),
+				}, sql);
+				yield* Effect.fromResult(printJson(result));
+			}),
+	).pipe(Command.withDescription("Read FBA stockout episodes per merchant, marketplace and FNSKU"));
+
+	const loadProductsCommand = Command.make(
+		"loadProducts",
+		{
+			wsid: wsidOption,
+			level: Flag.Literals("level", ["family", "parentAsin", "asin", "sku"]).pipe(Flag.withDefault("family")),
+			stores: Flag.String("stores").pipe(
+				Flag.withDescription("Countries, regions, marketplace IDs or merchantId-scope; default all stores"),
+				Flag.optional,
+			),
+			products: Flag.String("products").pipe(
+				Flag.withDescription("Families, parent ASINs or child ASINs"),
+				Flag.optional,
+			),
+			search: Flag.String("search").pipe(
+				Flag.withDescription("Literal substring in title or family"),
+				Flag.optional,
+			),
+			columns: Flag.String("columns").pipe(
+				Flag.withDescription("Comma-separated columns; see meta.columnsAvailable"),
+				Flag.optional,
+			),
+			includeUnassigned: Flag.Boolean("include-unassigned").pipe(
+				Flag.withDescription("Use --no-include-unassigned to exclude products without a family"),
+				Flag.withDefault(true),
+			),
+			limit: Flag.Int("limit").pipe(Flag.optional),
+			offset: Flag.Int("offset").pipe(Flag.optional),
+		},
+		(o) =>
+			Effect.gen(function* () {
+				const sql = yield* resolveSql(o);
+				const result = yield* loadProductsTool.run({
+					level: o.level,
+					stores: Option.getOrUndefined(o.stores),
+					products: Option.getOrUndefined(o.products),
+					search: Option.getOrUndefined(o.search),
+					columns: Option.getOrUndefined(o.columns),
+					includeUnassigned: o.includeUnassigned,
+					limit: Option.getOrUndefined(o.limit),
+					offset: Option.getOrUndefined(o.offset),
+				}, sql);
+				yield* Effect.fromResult(printJson(result));
+			}),
+	).pipe(Command.withDescription("Discover product families, parent ASINs, ASINs and seller SKUs"));
+
 	const listTablesCommand = Command.make(
 		"listTables",
 		{ wsid: wsidOption },
@@ -423,12 +517,15 @@ const program = Effect.gen(function* () {
 
 	const root = Command.make("core-mcp").pipe(
 		Command.withSubcommands([
+			listWorkspacesCommand,
 			loadAdsCommand,
 			loadTrafficCommand,
 			loadSqpCommand,
 			loadRankCommand,
 			loadEconomicsCommand,
 			loadTflInventoryCommand,
+			loadAmazonFbaStockoutsCommand,
+			loadProductsCommand,
 			inventoryPacingCommand,
 			salesDropDiagnosis,
 			listTablesCommand,

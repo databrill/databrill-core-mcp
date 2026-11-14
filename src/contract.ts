@@ -11,9 +11,11 @@ import { inventoryPacingTool } from "./tools/inventoryPacing/contract.ts";
 import { listTablesTool } from "./tools/listTables/contract.ts";
 import { loadAdsTool } from "./tools/loadAds/contract.ts";
 import { loadEconomicsTool } from "./tools/loadEconomics/contract.ts";
+import { loadProductsTool } from "./tools/loadProducts/contract.ts";
 import { loadRankTool } from "./tools/loadRank/contract.ts";
 import { loadSqpTool } from "./tools/loadSqp/contract.ts";
 import { loadTrafficTool } from "./tools/loadTraffic/contract.ts";
+import { loadAmazonFbaStockoutsTool } from "./tools/loadAmazonFbaStockouts/contract.ts";
 import { loadTflInventoryTool } from "./tools/loadTflInventory/contract.ts";
 import { salesDropDiagnosisTool } from "./tools/salesDropDiagnosis/contract.ts";
 import { writeSqlTool } from "./tools/writeSql/contract.ts";
@@ -51,6 +53,8 @@ export const tools: readonly McpTool[] = [
 	loadRankTool,
 	loadEconomicsTool,
 	loadTflInventoryTool,
+	loadAmazonFbaStockoutsTool,
+	loadProductsTool,
 	inventoryPacingTool,
 	salesDropDiagnosisTool,
 	listTablesTool,

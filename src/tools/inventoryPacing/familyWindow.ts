@@ -94,10 +94,10 @@ export function loadFamilyWindow(
 								eb.cast<string | null>(eb.fn.sum<string | null>("ad.unitsSold"), "numeric").as(
 									"adUnits",
 								),
-								eb.cast<string | null>(eb.fn.sum<string | null>("ad.totalCost"), "numeric").as(
+								eb.fn.sum<string | null>(eb.cast<string>(eb.ref("ad.totalCost"), "numeric")).as(
 									"adSpend",
 								),
-								eb.cast<string | null>(eb.fn.sum<string | null>("ad.sales"), "numeric").as(
+								eb.fn.sum<string | null>(eb.cast<string>(eb.ref("ad.sales"), "numeric")).as(
 									"adSales",
 								),
 							])
@@ -124,7 +124,7 @@ export function loadFamilyWindow(
 										| "totalCost"
 										| "sales",
 								) {
-									return eb.cast<string>(eb.fn.sum<string>(`ad.${column}`), "numeric");
+									return eb.fn.sum<string>(eb.cast<string>(eb.ref(`ad.${column}`), "numeric"));
 								}
 								return [
 									"ad.merchantId",
@@ -241,13 +241,10 @@ export function loadFamilyWindow(
 						// An aggregate over an arithmetic expression has no builder form:
 						// `eb.fn.sum(eb("item_price", "-", eb.fn.coalesce(...)))` fails with
 						// "Property 'isSelectQueryBuilder' is missing in type 'ExpressionWrapper<…>'".
-						eb.cast<string | null>(
-							eb.fn.sum<string | null>(
-								ksql<number>`${eb.ref("ao.item_price")} - COALESCE(${
-									eb.ref("ao.item_promotion_discount")
-								}, 0)`,
-							),
-							"numeric",
+						eb.fn.sum<string | null>(
+							ksql<string>`${eb.ref("ao.item_price")}::numeric - COALESCE(${
+								eb.ref("ao.item_promotion_discount")
+							}::numeric, 0)`,
 						).as("totalSales"),
 					])
 					.where((eb) => eb("ao.merchant_id", "=", eb.fn.any(ksql.val(merchantIds))))

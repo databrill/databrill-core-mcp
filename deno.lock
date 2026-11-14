@@ -3,15 +3,15 @@
   "specifiers": {
     "npm:@effect/platform-node-shared@4.1.2": "4.1.2_effect@4.1.2",
     "npm:@effect/platform-node@4.1.2": "4.1.2_effect@4.1.2_redis@6.3.1",
-    "npm:@jsr/databrill__core-pg-kysely@~0.1.19": "0.1.19",
+    "npm:@jsr/databrill__core-pg-kysely@~0.1.20": "0.1.20",
     "npm:@modelcontextprotocol/sdk@^1.32.2": "1.32.2_zod@4.6.7",
     "npm:@types/luxon@^3.7.6": "3.7.6",
-    "npm:dotenv@^18.0.9": "18.0.9",
+    "npm:dotenv@^18.0.10": "18.0.10",
     "npm:effect@4.1.2": "4.1.2",
     "npm:kysely@~0.29.8": "0.29.8",
     "npm:luxon@^3.5.0": "3.7.2",
     "npm:postgres@^3.4.8": "3.4.9",
-    "npm:temporal-polyfill@1.0.6": "1.0.6",
+    "npm:temporal-polyfill@1.0.8": "1.0.8",
     "npm:tinyduration@^3.3.1": "3.4.1"
   },
   "npm": {
@@ -38,14 +38,14 @@
         "hono"
       ]
     },
-    "@jsr/databrill__core-pg-kysely@0.1.19": {
-      "integrity": "sha512-hySWU8q24bHEhuiwCDcMj80EymQFPi910qRsGou11iu36y6BhC6wdQkKnawwP4SMkNw1dFssC8J9Z4errDYXLA==",
+    "@jsr/databrill__core-pg-kysely@0.1.20": {
+      "integrity": "sha512-cpvu1cekbmJ8lFgJoNZGVkUwPV1fphzTi7jEmBHOlKAsHC+1hXPyp9pkoo6p3Od4w6mxZlnezVShbQ3SStyOFA==",
       "dependencies": [
         "effect",
         "kysely",
         "pg"
       ],
-      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.19.tgz"
+      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.20.tgz"
     },
     "@modelcontextprotocol/sdk@1.32.2_zod@4.6.7": {
       "integrity": "sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==",
@@ -206,8 +206,8 @@
     "depd@2.0.0": {
       "integrity": "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw=="
     },
-    "dotenv@18.0.9": {
-      "integrity": "sha512-3fVOW4cB02R066PUSwn8O4TJyz9NckQl7F81blIbaq9jKBm2tSmOKky7ZHIXzGvkVPXCSn6jkpziBPZdGFs8Tw==",
+    "dotenv@18.0.10": {
+      "integrity": "sha512-89FAA1xchzK2mxVWdr5F/0rldwiueXs6zJM86rO66EzekR1iBdiXRthyG+m5GvkJaFH3C2LESzamTkgndmLT2A==",
       "bin": true
     },
     "dunder-proto@1.0.1": {
@@ -657,8 +657,8 @@
     "statuses@2.0.2": {
       "integrity": "sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw=="
     },
-    "temporal-polyfill@1.0.6": {
-      "integrity": "sha512-tYyEry1HLGUDbm2356W3iYD0OZdo7rlP7h98Zr/EnjqLZQwTAfcBDUvJnJbfA15v/vQad57hJZScG5O0W2oKEA==",
+    "temporal-polyfill@1.0.8": {
+      "integrity": "sha512-RCCGa0GddT099XG49ijdD0tDf86L8vfuZun1+JyJiO4Y2NP9PACQsG0OnvNPXwVLisdvhr/zqL2nhKQmXXx08A==",
       "dependencies": [
         "temporal-spec",
         "temporal-utils"
@@ -667,8 +667,8 @@
     "temporal-spec@1.0.1": {
       "integrity": "sha512-wxVoanmDeavXie1vu2JaQ3WIc3JZnWAOYFBsJyATaVsXsycKYUflGsyBmrRSnoCpZJpwPyr38VpgSUlQ8CbFxg=="
     },
-    "temporal-utils@1.0.3": {
-      "integrity": "sha512-9jbTSX3HvkOWvDpNpFzwX/d1mkCrgQgwLmVTOEiuocZGKHsrQJtttGZFmybJ2zYP5zCSZuU5ZyeS8+eOEPABiQ=="
+    "temporal-utils@1.0.4": {
+      "integrity": "sha512-4mAcgbWlaxe+gn23gk8g0iHxCVGVOhKzSCfF5HM3lfvH8BdT+/pBmH/R/E4CrIse+koUgs8ThkPzCLnui6Fi8w=="
     },
     "tinyduration@3.4.1": {
       "integrity": "sha512-NemFoamVYn7TmtwZKZ3OiliM9fZkr6EWiTM+wKknco6POSy2gS689xx/pXip0JYp40HXpUw6k65CUYHWYUXdaA=="
@@ -727,15 +727,15 @@
       "dependencies": [
         "npm:@effect/platform-node-shared@4.1.2",
         "npm:@effect/platform-node@4.1.2",
-        "npm:@jsr/databrill__core-pg-kysely@~0.1.19",
+        "npm:@jsr/databrill__core-pg-kysely@~0.1.20",
         "npm:@modelcontextprotocol/sdk@^1.32.2",
         "npm:@types/luxon@^3.7.6",
-        "npm:dotenv@^18.0.9",
+        "npm:dotenv@^18.0.10",
         "npm:effect@4.1.2",
         "npm:kysely@~0.29.8",
         "npm:luxon@^3.5.0",
         "npm:postgres@^3.4.8",
-        "npm:temporal-polyfill@1.0.6",
+        "npm:temporal-polyfill@1.0.8",
         "npm:tinyduration@^3.3.1"
       ]
     }

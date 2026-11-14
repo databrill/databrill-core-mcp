@@ -104,7 +104,6 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 		const keywordLimit = yield* Effect.fromResult(parseKeywordLimit(params.keywordLimit));
 
 		const stores = yield* resolveStores(params.stores, sql);
-		const marketplaceIds = [...new Set(stores.map((s) => s.marketplaceId))];
 		const range = yield* resolveWhen(params.when, sql);
 
 		let asins: string[] | null = null;
@@ -141,7 +140,15 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 				eb.fn.max<number | null>(jsonbInt(eb.ref("purchaseData"), "totalPurchaseCount")).as("market_purch"),
 			])
 			.where("timeUnit", "=", timeUnit)
-			.where("marketplaceId", "in", marketplaceIds)
+			// Keep exact pairs: separate IN lists would include unrequested stores
+			// when different merchants are selected in different marketplaces.
+			.where((eb) =>
+				eb(
+					eb.refTuple("merchantId", "marketplaceId"),
+					"in",
+					stores.map((s) => eb.tuple(s.merchantId, s.marketplaceId)),
+				)
+			)
 			.where("dateFirst", ">=", isoDateParam(range.dateFirst))
 			.where("dateFirst", "<=", isoDateParam(range.dateLast))
 			// The empty search term is excluded here, so both statements leave it out — see the module doc.

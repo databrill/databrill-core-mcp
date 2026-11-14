@@ -8,7 +8,6 @@
  */
 
 import "temporal-polyfill/global";
-import "dotenv/config";
 import packageJson from "../package.json" with { type: "json" };
 import { Effect } from "effect";
 import { runEffectPromiseExit } from "../src/effectCompat.ts";
@@ -18,9 +17,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "../src/config.ts";
 import { acquireSqlProvider } from "../src/db.ts";
 import { registerTools } from "../src/registerTools.ts";
+import { loadStartupEnv, packageRoot } from "../src/startup.ts";
 
 const program = Effect.gen(function* () {
-	const config = yield* loadConfig();
+	yield* loadStartupEnv();
+	const config = yield* loadConfig(undefined, { rootDir: packageRoot });
 	if (config === null) {
 		return yield* Effect.fail(
 			new Error("DATABRILL_CONFIG is required; unscoped POSTGRES_URL mode is not supported"),

@@ -15,6 +15,7 @@ src/
   db.ts                    # registry-selected pools + explicit cleanup
   clientData.ts            # client-DB data layer (portable descendant of digest _shared)
   config.ts                # workspace registry (DATABRILL_CONFIG) + explicit routing
+  startup.ts               # cwd-first environment loading and package-root fallback
   amazonConstants.ts       # marketplace facts (mirrored from the monorepo's canonical module)
   sqlGuardrails.ts         # execution guards shared by the four SQL tools
   tools/load*/             # ads, traffic, SQP, rank, economics, and TFL inventory
@@ -40,6 +41,7 @@ bun install                       # or: deno install
 cp .env.example .env              # set DATABRILL_CONFIG and its per-workspace URLs
 
 # CLI
+bun run bin/cli.ts listWorkspaces
 bun run bin/cli.ts salesDropDiagnosis --wsid 100000001 --all-stores --format json
 deno run -A bin/cli.ts salesDropDiagnosis --wsid 100000001 --stores DE,US
 deno run -A bin/cli.ts loadTflInventory --wsid 100000001 --max-available 20
@@ -51,8 +53,27 @@ bun run bin/stdio.ts
 MCP client config (Desktop / dev):
 
 ```json
-{ "mcpServers": { "databrill-core": { "command": "bun", "args": ["run", "bin/stdio.ts"] } } }
+{
+	"mcpServers": {
+		"databrill-core": {
+			"command": "bun",
+			"args": ["run", "/absolute/path/to/databrill-core-mcp/bin/stdio.ts"],
+			"env": {
+				"DATABRILL_CONFIG": "/absolute/path/to/databrill.config.json"
+			}
+		}
+	}
+}
 ```
+
+Replace both absolute paths with your own locations. The CLI and stdio server load `.env`
+from the current directory, then from the package root, filling only variables that are
+not already set. Relative `DATABRILL_CONFIG` paths try the current directory first, then
+the package root if no file is there. A config that exists but cannot be read, or is invalid,
+fails at startup.
+
+`listWorkspaces` prints the configured workspace ids, labels and merchants as JSON without
+opening a database connection. Run it before a data command to find its required `--wsid`.
 
 ## Library execution
 
@@ -143,7 +164,7 @@ They are separate so a read-only session can announce the read tools and nothing
 else — one flag could not express that, and filtering by tool name outside the
 feature mechanism is exactly what the tools' declared access kind exists to avoid.
 
-The CLI follows the same routing and requires `--wsid`, e.g.
+The CLI data commands follow the same routing and require `--wsid`, e.g.
 `deno run -A bin/cli.ts loadAds --wsid 100000001 --stores US --when P7D --groupBy store`.
 
 ## Parity
@@ -165,6 +186,7 @@ CLIENT=exampleclient AGENCY_REPO=~/src/agency-repo bun run test/parity_salesDrop
 ## Tool surface
 
 - `loadAds`, `loadTraffic`, `loadSqp`, `loadRank`, and `loadEconomics`
+- `loadAmazonFbaStockouts` for stockout episodes per merchant, marketplace and FNSKU, from FBA inventory history and, for the days before a store's history starts, the FBA inventory ledger; `stores` is required
 - `loadTflInventory` when the selected workspace enables `tflInventory`
 - `inventoryPacing`
 - `salesDropDiagnosis`
@@ -175,6 +197,32 @@ CLIENT=exampleclient AGENCY_REPO=~/src/agency-repo bun run test/parity_salesDrop
   to `registerTools`. The hosted MCP server supplies it; local stdio does not.
   It accepts only a `message` and sends it as the signed-in user's feedback. A
   problem that needs an answer goes to Contact support, under Help in DataBrill.
+
+## Product discovery
+
+Use `loadProducts` before choosing products for another loader. The default call lists
+workspace-wide families with their labels and ASIN counts. Choose `level: "parentAsin"`,
+`"asin"` or `"sku"` for marketplace-scoped detail; family and parent ASIN are independent
+groupings. Stores accept the same syntax as `loadAds` and default to all active real stores.
+
+`columns` selects a comma-separated projection; each response lists the available columns.
+`products` accepts families, parent ASINs or child ASINs, and `search` matches a literal
+substring in titles or family names. Missing labels remain null. Localized ASIN titles and
+parents come from the first available country in `meta.titleCountryPriority`; parent titles
+come from the parent catalog row, without substituting a child title.
+
+Results default to 200 rows (maximum 2000) and share the SQL tools’ compact-JSON byte cap.
+`meta.totalCount` reports the full matching count. Advance `offset` by `meta.rowCount`;
+if no row fits the byte cap, select fewer columns. `includeUnassigned: false` excludes
+products without a family, while `meta.unassignedCount` reports their count before exclusion.
+If a core source table is absent the result is empty and `meta.missingTables` names it;
+missing traffic or ontology tables disable only those optional lookups.
+
+For example:
+
+```bash
+bun run bin/cli.ts loadProducts --wsid 100000001 --level asin --stores DE --columns asin,title --limit 50
+```
 
 ## The SQL tools
 

@@ -2,7 +2,7 @@
  * loadAds — MCP tool contract. The primary metric-fetch tool (the `dbl-metrics-ads`
  * loader): Amazon advertising performance aggregated by configurable dimensions,
  * with halo (cross-product) metrics and optional derived ratios. Migrated from
- * core-agent-docs `src/amazonMetrics`; the loader (`loadAds.ts`) is unchanged.
+ * core-agent-docs `src/amazonMetrics`.
  */
 
 import { stringArgument } from "../../toolParams.ts";
@@ -28,7 +28,7 @@ const inputSchema = {
 			type: "string",
 			description: `Comma-separated dimensions: ${
 				VALID_GROUP_BY.join(", ")
-			}. Required. Use 'store' for no specific breakdown.`,
+			}. Required. Use 'store' for no specific breakdown. 'target' also returns targetMatchType and requires a products or campaignName filter.`,
 		},
 		timeUnit: {
 			type: "string",
@@ -89,8 +89,10 @@ export const loadAdsTool = {
 		"optionally derived ratios (CTR, CR, CPC, ACOS, ROAS). Reads the client DB; Amazon's ad reports lag 1-2 days. " +
 		"Rows built only from halo-in metrics (this product's sales that Amazon credits to ads for other products) " +
 		"carry haloInOnly: true and zero advertised and halo-out metrics. Such rows appear, with or without a products " +
-		"filter, for a product with no ads of its own in the row's window or time bucket, and groupBy placement reports " +
-		"all halo-in under a null placement because Amazon's halo-in report has no placement. haloInOnly is a top-level " +
+		"filter, for a product with no ads of its own in the row's window or time bucket. groupBy placement or target " +
+		"reports halo-in under null placement or null target/targetMatchType respectively, because Amazon's halo-in " +
+		"report has neither dimension. groupBy target returns targetMatchType alongside target and requires a products " +
+		"filter or an exact campaignName filter ('campaignName:=:<name>'). haloInOnly is a top-level " +
 		"field in nested output too. meta.dateDataLatest is the latest date with ad data for the selected stores, " +
 		"whatever the window, or null when they have none.",
 	inputSchema,
