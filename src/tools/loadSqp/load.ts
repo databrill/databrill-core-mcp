@@ -36,7 +36,7 @@
  *     SELECT 1 FROM "amzreport_SEARCH_QUERY_PERFORMANCE"
  *     WHERE "timeUnit" = 'WEEK' AND "dateFirst" = '<week>'
  *     GROUP BY "searchQuery", "marketplaceId", "dateFirst"
- *     HAVING count(DISTINCT ("impressionData"->>'totalQueryImpressionCount')) > 1
+ *     HAVING count(DISTINCT "totalQueryImpressionCount") > 1
  *   ) t;
  * Zero is the expected answer. A non-zero count means two report vintages are in
  * the table — fix the data, do not switch to `AVG`, which would hide it.
@@ -47,7 +47,6 @@ import type postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { isoDateParam, runCompiled } from "../../runCompiled.ts";
-import { jsonbInt } from "../../sqlJson.ts";
 import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import {
 	DEFAULT_KEYWORD_LIMIT,
@@ -125,19 +124,17 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 				"marketplaceId",
 				"dateFirst",
 				"searchQuery",
-				eb.fn.sum<string | null>(jsonbInt(eb.ref("impressionData"), "asinImpressionCount")).as("our_impr"),
-				eb.fn.sum<string | null>(jsonbInt(eb.ref("clickData"), "asinClickCount")).as("our_clicks"),
-				eb.fn.sum<string | null>(jsonbInt(eb.ref("purchaseData"), "asinPurchaseCount")).as("our_purch"),
+				eb.fn.sum<string | null>(eb.ref("asinImpressionCount")).as("our_impr"),
+				eb.fn.sum<string | null>(eb.ref("asinClickCount")).as("our_clicks"),
+				eb.fn.sum<string | null>(eb.ref("asinPurchaseCount")).as("our_purch"),
 				// MAX, not SUM: the total* columns are whole-market figures that the
 				// report repeats identically on every ASIN row of a (searchQuery,
 				// marketplaceId, dateFirst) group. MAX reads that single value; SUM
 				// would multiply it by the number of our ASINs that happen to rank for
 				// the term.
-				eb.fn.max<number | null>(jsonbInt(eb.ref("impressionData"), "totalQueryImpressionCount")).as(
-					"market_impr",
-				),
-				eb.fn.max<number | null>(jsonbInt(eb.ref("clickData"), "totalClickCount")).as("market_clicks"),
-				eb.fn.max<number | null>(jsonbInt(eb.ref("purchaseData"), "totalPurchaseCount")).as("market_purch"),
+				eb.fn.max<number | null>(eb.ref("totalQueryImpressionCount")).as("market_impr"),
+				eb.fn.max<number | null>(eb.ref("totalClickCount")).as("market_clicks"),
+				eb.fn.max<number | null>(eb.ref("totalPurchaseCount")).as("market_purch"),
 			])
 			.where("timeUnit", "=", timeUnit)
 			// Keep exact pairs: separate IN lists would include unrequested stores

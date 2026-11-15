@@ -41,10 +41,10 @@ export interface SqpPeriodRow {
  * Inverting a share instead (`ourClicks / (clickShare / 100)`) inherits the
  * `round3` error — severe at small shares — and is undefined when the share is 0.
  *
- * A market rate must be derived from these counts and NEVER from the report's
- * `clickData->totalClickRate` / `purchaseData->totalPurchaseRate` columns, which
- * are computed by Amazon against the query's search volume rather than its
- * impressions, so they do not combine with impression counts into a market CTR.
+ * A market rate must be derived from these counts and NEVER from Amazon's
+ * per-search click or purchase rate, which the report computes against the
+ * query's search volume rather than its impressions, so it does not combine
+ * with impression counts into a market CTR. The table does not store it.
  * The `dbl-metrics-sqp` skill gives the same warning.
  */
 export interface SqpKeywordRow {
