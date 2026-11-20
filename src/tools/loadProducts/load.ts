@@ -6,10 +6,12 @@
  * Ontology views require a separate naming pipeline, so discovery reads the
  * canonical brand configuration directly and preserves missing labels as null.
  */
+import { resolveProducts, resolveProductsForStores } from "../../productSelection.ts";
+import { CATALOG_ROWS_SQL } from "../../catalogRows.ts";
 import { Effect } from "effect";
 import type { Sql } from "postgres";
 import { tryPromiseOrOperationError } from "../../effectErrors.ts";
-import { resolveProducts, resolveStores } from "../loadAds/loadAds.ts";
+import { resolveStores } from "../loadAds/loadAds.ts";
 import { createRowAccumulator, envelopeByteLength, MAX_RESULT_BYTES } from "../../sqlGuardrails.ts";
 import {
 	COLUMNS_AVAILABLE,
@@ -88,7 +90,14 @@ export function loadProducts(params: LoadProductsParams, sql: Sql): Effect.Effec
 			country: store.countryCode,
 			rank,
 		}));
-		const products = params.products ? yield* resolveProducts(params.products, sql) : null;
+		const products = params.products ? yield* resolveProductsForStores(params.products, sql, stores) : null;
+		const selected: { readonly country: string | null; readonly asin: string }[] = stores.flatMap((store) =>
+			[...(products?.get(store.marketplaceId) ?? [])].map((asin) => ({ country: store.countryCode, asin }))
+		);
+		if (stores.length === 0 && params.products) {
+			const configured = yield* resolveProducts(params.products, sql, { country: null });
+			selected.push(...configured.map((asin) => ({ country: null, asin })));
+		}
 		const search = params.search?.toLowerCase() ?? "";
 		const ontology = present.has("brand_config_ontology_category") && present.has("brand_config_ontology_variant")
 			? yield* tryPromiseOrOperationError(() =>
@@ -120,9 +129,9 @@ export function loadProducts(params: LoadProductsParams, sql: Sql): Effect.Effec
 				SELECT DISTINCT ON (c.asin, s.country) c.asin, s.country, s.rank,
 					c.parent_asin AS parent, c.summaries->>'itemName' AS title,
 					c.summaries->>'brand' AS brand, c.product_type AS "productType"
-				FROM "amzspapi_catalog_items_v20220401__catalogitem" c JOIN scope s
-				ON s.country = CASE WHEN c.marketplace_code = 'UK' THEN 'GB' ELSE c.marketplace_code END
-				ORDER BY c.asin, s.country, s.rank, c.marketplace_code
+				FROM (${sql.unsafe(CATALOG_ROWS_SQL)}) c JOIN scope s
+				ON s.country = c.country
+				ORDER BY c.asin, s.country, s.rank
 			),
 			listings AS (
 				SELECT l."sellerSku" AS sku, s.country, s.merchant AS "merchantId", s.marketplace,
@@ -144,7 +153,10 @@ export function loadProducts(params: LoadProductsParams, sql: Sql): Effect.Effec
 				FROM identifiers i LEFT JOIN catalog c ON c.asin = i.asin AND c.country = i.country
 				LEFT JOIN LATERAL (${fallback}) f ON true
 				LEFT JOIN brand_config_amazon_asin a ON a.asin = i.asin
-				WHERE (${products === null} OR i.asin = ANY(${products ?? []}::text[]))
+				WHERE (${products === null} OR EXISTS (SELECT 1 FROM jsonb_to_recordset(${
+				sql.json(selected)
+			}) AS p(country text, asin text)
+WHERE p.asin = i.asin AND (i.country IS NULL OR p.country = i.country)))
 			),
 			visible_children AS (SELECT * FROM children WHERE ${
 				params.includeUnassigned !== false

@@ -41,7 +41,7 @@ const inputSchema = {
 		products: {
 			type: "string",
 			description:
-				"Optional comma-separated filter: family names, parent ASINs (auto-expanded), or child ASINs. " +
+				"Optional comma-separated filter: family names, parent ASINs (expanded within each marketplace), or child ASINs. " +
 				"A family name that maps to no ASIN is dropped without an error; the call fails only when no token " +
 				"resolves to any ASIN.",
 		},

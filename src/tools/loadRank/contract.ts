@@ -25,7 +25,8 @@ const inputSchema = {
 		},
 		products: {
 			type: "string",
-			description: "Optional filter: family names, parent ASINs (auto-expanded), or child ASINs. Without it, " +
+			description:
+				"Optional filter: family names, parent ASINs (expanded within each marketplace), or child ASINs. Without it, " +
 				"every ranked ASIN in each requested marketplace is returned, one row per ASIN, category and day, " +
 				"with no row cap. A family name that maps to no ASIN is dropped without an error; the call fails " +
 				"only when no token resolves to any ASIN.",

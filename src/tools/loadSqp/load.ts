@@ -41,13 +41,14 @@
  * Zero is the expected answer. A non-zero count means two report vintages are in
  * the table — fix the data, do not switch to `AVG`, which would hide it.
  */
-
+import { sql as ksql } from "kysely";
+import { type ProductSelection, productSelectionPredicate, resolveProductsForStores } from "../../productSelection.ts";
 import { Effect, Result } from "effect";
 import type postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { isoDateParam, runCompiled } from "../../runCompiled.ts";
-import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
+import { resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import {
 	DEFAULT_KEYWORD_LIMIT,
 	type LoadSqpParams,
@@ -105,10 +106,10 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 		const stores = yield* resolveStores(params.stores, sql);
 		const range = yield* resolveWhen(params.when, sql);
 
-		let asins: string[] | null = null;
+		let asins: ProductSelection | null = null;
 		if (params.products) {
-			asins = yield* resolveProducts(params.products, sql);
-			if (asins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
+			asins = yield* resolveProductsForStores(params.products, sql, stores);
+			if (asins.size === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 		// One builder for the whole invocation, built before the CTE: it is where a
 		// future `.withSchema(workspaceSchema)` would attach.
@@ -153,7 +154,7 @@ export function loadSqp(params: LoadSqpParams, sql: postgres.Sql): Effect.Effect
 			.groupBy(["marketplaceId", "dateFirst", "searchQuery"]);
 		// The products filter stays INSIDE the CTE — see the module doc.
 		if (asins !== null) {
-			perQuery = perQuery.where("asin", "in", asins);
+			perQuery = perQuery.where(productSelectionPredicate(asins, ksql.ref("asin"), ksql.ref("marketplaceId")));
 		}
 
 		const periodRows = yield* runCompiled(

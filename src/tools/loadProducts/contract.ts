@@ -36,7 +36,7 @@ export const loadProductsTool = {
 			products: {
 				type: "string",
 				description:
-					"Optional comma-separated families, parent ASINs (expanded to children), or child ASINs; same syntax as loadAds.",
+					"Optional comma-separated families, parent ASINs (expanded to children within each marketplace), or child ASINs; same syntax as loadAds.",
 			},
 			search: {
 				type: "string",

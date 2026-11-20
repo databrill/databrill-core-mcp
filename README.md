@@ -18,7 +18,7 @@ src/
   startup.ts               # cwd-first environment loading and package-root fallback
   amazonConstants.ts       # marketplace facts (mirrored from the monorepo's canonical module)
   sqlGuardrails.ts         # execution guards shared by the four SQL tools
-  tools/load*/             # ads, traffic, SQP, rank, economics, and TFL inventory
+  tools/load*/             # ads, traffic, SQP, rank, economics, products, FBA stockouts, and TFL inventory
   tools/inventoryPacing/   # Amazon inventory-to-ad action
   tools/salesDropDiagnosis/ {types,load,render,contract}.ts
   tools/executeSql/        # guarded read-only SQL passthrough
@@ -109,7 +109,7 @@ The CLI and stdio programs finish with `Effect.scoped`; stdio acquires its serve
 scope, so server shutdown precedes pool teardown. Cleanup failures become defects and remain
 in the Cause alongside work failures and interruption.
 
-Effect is a public dependency pinned to 4.1.2. Consumers composing local package
+Effect is a public dependency pinned to 4.1.4. Consumers composing local package
 source must resolve the same Effect version: different versions have incompatible
 private iterator types. The database driver's own query objects and transaction
 callbacks retain their native contracts; owned tool programs remain Effects.
@@ -186,6 +186,7 @@ CLIENT=exampleclient AGENCY_REPO=~/src/agency-repo bun run test/parity_salesDrop
 ## Tool surface
 
 - `loadAds`, `loadTraffic`, `loadSqp`, `loadRank`, and `loadEconomics`
+- `loadProducts` for product discovery (see below)
 - `loadAmazonFbaStockouts` for stockout episodes per merchant, marketplace and FNSKU, from FBA inventory history and, for the days before a store's history starts, the FBA inventory ledger; `stores` is required
 - `loadTflInventory` when the selected workspace enables `tflInventory`
 - `inventoryPacing`
@@ -206,7 +207,7 @@ workspace-wide families with their labels and ASIN counts. Choose `level: "paren
 groupings. Stores accept the same syntax as `loadAds` and default to all active real stores.
 
 `columns` selects a comma-separated projection; each response lists the available columns.
-`products` accepts families, parent ASINs or child ASINs, and `search` matches a literal
+`products` accepts families, parent ASINs or child ASINs. Parent ASINs select their children separately in each requested marketplace; configured families remain workspace-wide. `search` matches a literal
 substring in titles or family names. Missing labels remain null. Localized ASIN titles and
 parents come from the first available country in `meta.titleCountryPriority`; parent titles
 come from the parent catalog row, without substituting a child title.

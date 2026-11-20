@@ -1,3 +1,5 @@
+import { type ProductSelection, productSelectionPredicate, resolveProductsForStores } from "../../productSelection.ts";
+import { catalogRows } from "../../catalogRows.ts";
 import { Effect, Result } from "effect";
 import { tryOrOperationError } from "../../effectErrors.ts";
 import type postgres from "postgres";
@@ -84,9 +86,6 @@ export type GroupByDim = typeof VALID_GROUP_BY[number];
 export const VALID_TIME_UNITS = ["DAY", "WEEK", "MONTH", "QUARTER", "YEAR"] as const;
 export type TimeUnit = typeof VALID_TIME_UNITS[number];
 
-// A regular ASIN, or a book ASIN: Amazon uses the ISBN-10 (nine digits and a
-// check digit that may be `X`) as the ASIN of a book listing.
-const ASIN_PATTERN = /^(B0[A-Z0-9]{8}|[0-9]{9}[0-9X])$/i;
 const UNRESOLVED_ASIN = "B0000000000";
 
 // ---------------------------------------------------------------------------
@@ -416,61 +415,8 @@ export function resolveWhen(
 }
 
 // ---------------------------------------------------------------------------
-// Products Resolution
+// Optional family configuration
 // ---------------------------------------------------------------------------
-
-export function resolveProducts(
-	productsStr: string,
-	sql: postgres.Sql,
-	options?: { readonly warnOnMissingFamily?: boolean },
-): Effect.Effect<string[], Error> {
-	return Effect.gen(function* () {
-		const db = createCanonicalQueryBuilder();
-		const tokens = productsStr.split(",").map((s) => s.trim()).filter(Boolean);
-		const childAsins = new Set<string>();
-		// Only a family-name token reads the family table, so only then is it probed.
-		const familyTable = tokens.some((token) => !ASIN_PATTERN.test(token))
-			? (yield* probeFamilyTable(db, sql))
-			: false;
-
-		for (const token of tokens) {
-			if (ASIN_PATTERN.test(token)) {
-				// Check if parent ASIN -> expand to children
-				const children = yield* runCompiled(
-					sql,
-					() =>
-						db
-							.selectFrom("amzspapi_catalog_items_v20220401__catalogitem")
-							.select("asin")
-							.where("parent_asin", "=", token)
-							.compile(),
-				);
-				if (children.length > 0) {
-					for (const row of children) childAsins.add(row.asin);
-				} else {
-					// Treat as child ASIN directly
-					childAsins.add(token);
-				}
-			} else {
-				// Family name lookup
-				const rows = familyTable
-					? yield* runCompiled(
-						sql,
-						() =>
-							db.selectFrom("brand_config_amazon_asin").select("asin").where("family", "=", token)
-								.compile(),
-					)
-					: [];
-				if (rows.length === 0 && options?.warnOnMissingFamily !== false) {
-					console.error(`Warning: no ASINs found for family '${token}'`);
-				}
-				for (const row of rows) childAsins.add(row.asin);
-			}
-		}
-
-		return [...childAsins];
-	});
-}
 
 /**
  * Whether this workspace has `brand_config_amazon_asin`.
@@ -994,7 +940,12 @@ function sbAsinLookup(db: CanonicalDb, stores: ResolvedStore[]) {
  * `cat` and `camp_filt` goes through `ksql.ref`. The join predicates INSIDE each
  * callback are fully checked against `DB`.
  */
-function query1Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins) {
+function query1Base(
+	db: CanonicalDb,
+	stores: ResolvedStore[],
+	joins: QueryJoins,
+	country: Expression<string | null>,
+) {
 	return sbAsinLookup(db, stores)
 		.selectFrom("amzadapi_reports_v1__search_asin_placement__byDay as r")
 		.leftJoin("sb_asin_lookup as sb_lookup", (join) =>
@@ -1020,8 +971,10 @@ function query1Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins)
 		)
 		.$if(joins.needsParentAsinJoin, (qb) =>
 			qb.leftJoin(
-				"amzspapi_catalog_items_v20220401__catalogitem as cat",
-				(join) => join.on("cat.asin", "=", resolvedAsinExpr()),
+				catalogRows().as("cat"),
+				(join) =>
+					join.on("cat.asin", "=", resolvedAsinExpr())
+						.on("cat.country", "=", country),
 			))
 		.$if(joins.needsCampFiltJoin, (qb) =>
 			qb.leftJoin("amzadapi_exports_v1__campaign as camp_filt", (join) =>
@@ -1037,7 +990,7 @@ function buildQuery1(
 	range: DateRange,
 	dims: GroupByDim[],
 	timeUnit: TimeUnit | null,
-	productAsins: string[] | null,
+	productAsins: ProductSelection | null,
 	filter: FilterExpr | null,
 	familyTable: boolean,
 ) {
@@ -1048,6 +1001,12 @@ function buildQuery1(
 		const resolvedAsin = resolvedAsinExpr();
 		const dims1 = yield* buildDimExprs(dims, stores, resolvedAsin, familyTable);
 		const currency = yield* currencyCaseExpr(stores);
+		const country = yield* caseOverRef(
+			"r.marketplaceId",
+			distinctMarketplaces(stores),
+			(s) => s.marketplaceId,
+			(s) => s.countryCode,
+		);
 
 		const groupByCols: GroupByEntry[] = [];
 		// Currency grouping (for multi-store)
@@ -1055,7 +1014,7 @@ function buildQuery1(
 		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
 		groupByCols.push(...dims1.groupBy);
 
-		let query = query1Base(db, stores, queryJoins(plan, filter, familyTable))
+		let query = query1Base(db, stores, queryJoins(plan, filter, familyTable), country)
 			.select((eb) => [
 				currency,
 				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
@@ -1098,7 +1057,7 @@ function buildQuery1(
 		if (productAsins) {
 			// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
 			// i.e. attacker-writable data — bind every one of them.
-			query = query.where(resolvedAsin, "in", productAsins);
+			query = query.where(productSelectionPredicate(productAsins, resolvedAsin, ksql.ref("r.marketplaceId")));
 		}
 		if (filter) {
 			// The filter value is raw caller text (`--filter campaignName:=:<value>`).
@@ -1118,7 +1077,12 @@ function buildQuery1(
 // ---------------------------------------------------------------------------
 
 /** Query 2's FROM and its joins. See {@link query1Base} for the `$if` reasoning. */
-function query2Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins) {
+function query2Base(
+	db: CanonicalDb,
+	stores: ResolvedStore[],
+	joins: QueryJoins,
+	country: Expression<string | null>,
+) {
 	return sbAsinLookup(db, stores)
 		.selectFrom("amzadapi_reports_v1__product01__byDay as r")
 		.leftJoin("sb_asin_lookup as sb_lookup", (join) =>
@@ -1145,8 +1109,10 @@ function query2Base(db: CanonicalDb, stores: ResolvedStore[], joins: QueryJoins)
 			))
 		.$if(joins.needsParentAsinJoin, (qb) =>
 			qb.leftJoin(
-				"amzspapi_catalog_items_v20220401__catalogitem as cat",
-				(join) => join.on("cat.asin", "=", resolvedAsinExprProduct01()),
+				catalogRows().as("cat"),
+				(join) =>
+					join.on("cat.asin", "=", resolvedAsinExprProduct01())
+						.on("cat.country", "=", country),
 			))
 		.$if(joins.needsCampFiltJoin, (qb) =>
 			qb.leftJoin("amzadapi_exports_v1__campaign as camp_filt", (join) =>
@@ -1162,7 +1128,7 @@ function buildQuery2(
 	range: DateRange,
 	dims: GroupByDim[],
 	timeUnit: TimeUnit | null,
-	productAsins: string[] | null,
+	productAsins: ProductSelection | null,
 	filter: FilterExpr | null,
 	familyTable: boolean,
 ) {
@@ -1181,6 +1147,12 @@ function buildQuery2(
 			familyTable,
 		);
 		const currency = yield* currencyCaseExpr(stores);
+		const country = yield* caseOverRef(
+			"r.marketplaceId",
+			distinctMarketplaces(stores),
+			(s) => s.marketplaceId,
+			(s) => s.countryCode,
+		);
 
 		// Keep a real grouping even for one marketplace: placement/target can remove
 		// every requested halo dimension. An empty GROUP BY is invalid, and an
@@ -1189,7 +1161,7 @@ function buildQuery2(
 		if (timeUnit) groupByCols.push(timeUnitGroupBy(timeUnit));
 		groupByCols.push(...dims2.groupBy);
 
-		let query = query2Base(db, stores, queryJoins(plan, filter, familyTable))
+		let query = query2Base(db, stores, queryJoins(plan, filter, familyTable), country)
 			.select((eb) => [
 				currency,
 				...(timeUnit ? timeUnitSelectExprs(timeUnit) : []),
@@ -1227,7 +1199,7 @@ function buildQuery2(
 		if (productAsins) {
 			// ASINs come out of client tables (`brand_config_amazon_asin`, the catalog),
 			// i.e. attacker-writable data — bind every one of them.
-			query = query.where(resolvedAsin, "in", productAsins);
+			query = query.where(productSelectionPredicate(productAsins, resolvedAsin, ksql.ref("r.marketplaceId")));
 		}
 		if (filter) {
 			// The filter value is raw caller text (`--filter campaignName:=:<value>`).
@@ -1498,10 +1470,10 @@ export function loadAds(
 		const range = yield* resolveWhen(params.when, sql);
 
 		// Resolve --products
-		let productAsins: string[] | null = null;
+		let productAsins: ProductSelection | null = null;
 		if (params.products) {
-			productAsins = yield* resolveProducts(params.products, sql);
-			if (productAsins.length === 0) {
+			productAsins = yield* resolveProductsForStores(params.products, sql, stores);
+			if (productAsins.size === 0) {
 				return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 			}
 		}

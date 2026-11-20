@@ -1,9 +1,12 @@
 /**
  * loadEconomics — per-advertised-ASIN profitability. Fetches the ad rollup via
- * `loadAds` (groupBy=asin, with halo) and applies `computeEconomics`. The
- * cost inputs (price/COGS/fees) are NOT in the client DB, so the caller supplies
- * them in `economics`; without them, every economics figure (ad cost per sale
- * included) is zero with source="missing", and only the rollup carries data.
+ * `loadAds` (groupBy=asin, with halo) and applies `computeEconomics`. The tool
+ * does not read the cost inputs (price/COGS/fees): the caller supplies them in
+ * `economics`, reading them from the client DB's `amzreport_FBA_FEE_PREVIEW`
+ * (price, referral and FBA fee per unit) and the `UNIT_COGS` attribute of
+ * `brand_config_amazon_attributes`. Without them, every economics figure (ad cost
+ * per sale included) is zero with source="missing", and only the rollup carries
+ * data.
  */
 
 import { Effect, Result } from "effect";

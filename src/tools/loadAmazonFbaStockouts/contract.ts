@@ -16,7 +16,8 @@ const inputSchema = {
 		},
 		products: {
 			type: "string",
-			description: "Optional comma-separated child or parent ASINs, family names, FNSKUs or seller SKUs. " +
+			description:
+				"Optional comma-separated child or parent ASINs, family names, FNSKUs or seller SKUs. Parent ASINs expand within each marketplace. " +
 				"Every token is also matched exactly as an FNSKU and as a seller SKU.",
 		},
 		limit: {

@@ -1,30 +1,30 @@
 {
   "version": "5",
   "specifiers": {
-    "npm:@effect/platform-node-shared@4.1.2": "4.1.2_effect@4.1.2",
-    "npm:@effect/platform-node@4.1.2": "4.1.2_effect@4.1.2_redis@6.3.1",
-    "npm:@jsr/databrill__core-pg-kysely@~0.1.22": "0.1.22",
+    "npm:@effect/platform-node-shared@4.1.4": "4.1.4_effect@4.1.4",
+    "npm:@effect/platform-node@4.1.4": "4.1.4_effect@4.1.4_redis@6.3.1",
+    "npm:@jsr/databrill__core-pg-kysely@~0.1.23": "0.1.23",
     "npm:@modelcontextprotocol/sdk@^1.32.2": "1.32.2_zod@4.6.7",
     "npm:@types/luxon@^3.7.6": "3.7.6",
     "npm:dotenv@^18.0.10": "18.0.10",
-    "npm:effect@4.1.2": "4.1.2",
-    "npm:kysely@~0.29.8": "0.29.8",
+    "npm:effect@4.1.4": "4.1.4",
+    "npm:kysely@~0.29.9": "0.29.9",
     "npm:luxon@^3.5.0": "3.7.2",
     "npm:postgres@^3.4.8": "3.4.9",
     "npm:temporal-polyfill@1.0.8": "1.0.8",
     "npm:tinyduration@^3.3.1": "3.4.1"
   },
   "npm": {
-    "@effect/platform-node-shared@4.1.2_effect@4.1.2": {
-      "integrity": "sha512-wSwl9A/G1hcVvF8nLI+YfB3EyOIDvWS6+lsTZBkmgDnPBL7m8YWZF+1HD+mdEsb52SUGfukip46Q3gRwSdk3QA==",
+    "@effect/platform-node-shared@4.1.4_effect@4.1.4": {
+      "integrity": "sha512-DWdfphHGOFJNj/mYadgpT3jIm8aRXDcPrQiGXFBH4p2H4XmA7iYMrPsI8NxVgZ7kNX0q1+FGJZJama0tINHRAg==",
       "dependencies": [
         "@types/ws",
         "effect",
         "ws"
       ]
     },
-    "@effect/platform-node@4.1.2_effect@4.1.2_redis@6.3.1": {
-      "integrity": "sha512-ye0UjxORdd5Qu3paZ1LljgGOALWHt7muP9VTpjUSCNfcesiB/Hm7wPJIvZeu4gnwpTe5BtEnO1VHngWqjJp8mA==",
+    "@effect/platform-node@4.1.4_effect@4.1.4_redis@6.3.1": {
+      "integrity": "sha512-h7QExTPq/RfYtHP/8tMlgfBvqYsuJKhxfkU6w0+NaF/ihqQ8Y3GH9t28ltupQjoqMM7P6W5gy8rOji7F0qVrmg==",
       "dependencies": [
         "@effect/platform-node-shared",
         "effect",
@@ -38,14 +38,14 @@
         "hono"
       ]
     },
-    "@jsr/databrill__core-pg-kysely@0.1.22": {
-      "integrity": "sha512-i4DhWPJ3rKvZK499S6MGF+Z0GHbZ93Jc+/LG3Kc8aajgaEbAtADmQy4Cjfu38M0K8Q2/hFk3IqRO899+z+SX/g==",
+    "@jsr/databrill__core-pg-kysely@0.1.23": {
+      "integrity": "sha512-N78+MY/u3Mh8YVH/BPNWPC7WN4s9EV9NFh1fJg5b6dr2y0EzdVlCTX1gNxs/Il4ML9jKK6vALbPXk2dVrApJHQ==",
       "dependencies": [
         "effect",
         "kysely",
         "pg"
       ],
-      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.22.tgz"
+      "tarball": "https://npm.jsr.io/~/11/@jsr/databrill__core-pg-kysely/0.1.23.tgz"
     },
     "@modelcontextprotocol/sdk@1.32.2_zod@4.6.7": {
       "integrity": "sha512-SWsVtH/0vULSQStoZ6xxH2K09Li8fXYTMC64ZeogCdpZ3XSi1eCPOByV1OpuJxuI3OcmHhosDWYyii07tpPsLw==",
@@ -221,8 +221,8 @@
     "ee-first@1.1.1": {
       "integrity": "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="
     },
-    "effect@4.1.2": {
-      "integrity": "sha512-d3Oah1WyKxFLFh19yWheS5IXIVaITzxZ71JkE1rkUozq/6EcJSU5nPk5bF2QrSygZ3SQoiNQB8TsxFriyMeMaQ=="
+    "effect@4.1.4": {
+      "integrity": "sha512-Tgrv/9FN+TZYyOn8XSli+fVqAfwDrDAkiX5Uu9vztINb675VTQdhD0gWI5Kzvhlh9QqzjZvw72iugqw5pwoghQ=="
     },
     "encodeurl@2.0.1": {
       "integrity": "sha512-Ev/hIyePLZtpL98x562lvPtenrUfGr0lfaf44HFZ+hDEwso7ccV9QAZrEVLg0hxNAzygaAFxy2dYaAKKM0G06A=="
@@ -398,8 +398,8 @@
     "json-schema-typed@8.0.2": {
       "integrity": "sha512-fQhoXdcvc3V28x7C7BMs4P5+kNlgUURe2jmUT1T//oBRMDrqy1QPelJimwZGo7Hg9VPV3EQV5Bnq4hbFy2vetA=="
     },
-    "kysely@0.29.8": {
-      "integrity": "sha512-ixHU1H4R+LeC5Y0nAhYgiGRFpFRHm2DXKEmJSs/vbes9sKXyssyzxzE/NYiOJX5fY0BL28biCre3GqlCqUwyXQ=="
+    "kysely@0.29.9": {
+      "integrity": "sha512-K48ErswC3MlIcBqR0pYIIEl+n9rIgwxgzaM1FxKHMXn7egxr1NHj7bCeF98mXl9A3/QoL5I7mo5S/mLXgeDgGA=="
     },
     "luxon@3.7.2": {
       "integrity": "sha512-vtEhXh/gNjI9Yg1u4jX/0YVPMvxzHuGgCm6tC5kZyb08yjGWGnqAjGJvcXbqQR2P3MyMEFnRbpcdFS6PBcLqew=="
@@ -706,8 +706,8 @@
     "wrappy@1.0.2": {
       "integrity": "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="
     },
-    "ws@8.22.1": {
-      "integrity": "sha512-oyL6OPYme/CmiFvNuGzeoxCJ4nOrZE2O1FwM9MWM1AsGri6nLXB2pg+lNA8aLeXMSav0J6eIVS1j6vUPzUtK9g=="
+    "ws@8.23.0": {
+      "integrity": "sha512-wCkmX8QMOrKjgO8HW2WyDbTSGeqkocxgDzS9iR79rEAexty6/2qzilx3Ag8Tqf9ykop3irLKle0MtVn5qjVnoQ=="
     },
     "xtend@4.0.2": {
       "integrity": "sha512-LKYU1iAXJXUgAXn9URjiu+MWhyUXHsvfp7mcuYm9dSUKK0/CjtrUwFAxD82/mCWbtLsGjFIad0wIsod4zrTAEQ=="
@@ -725,14 +725,14 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
-        "npm:@effect/platform-node-shared@4.1.2",
-        "npm:@effect/platform-node@4.1.2",
-        "npm:@jsr/databrill__core-pg-kysely@~0.1.22",
+        "npm:@effect/platform-node-shared@4.1.4",
+        "npm:@effect/platform-node@4.1.4",
+        "npm:@jsr/databrill__core-pg-kysely@~0.1.23",
         "npm:@modelcontextprotocol/sdk@^1.32.2",
         "npm:@types/luxon@^3.7.6",
         "npm:dotenv@^18.0.10",
-        "npm:effect@4.1.2",
-        "npm:kysely@~0.29.8",
+        "npm:effect@4.1.4",
+        "npm:kysely@~0.29.9",
         "npm:luxon@^3.5.0",
         "npm:postgres@^3.4.8",
         "npm:temporal-polyfill@1.0.8",

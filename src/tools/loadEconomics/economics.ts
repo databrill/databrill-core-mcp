@@ -2,9 +2,10 @@
  * Profitability compute — ported verbatim (logic) from the original
  * `listingAnalysis/economics.ts`. Pure: no DB, no marketplace coupling.
  *
- * Needs per-ASIN cost inputs (price/COGS/fees) supplied by the caller — the
- * client DB does not hold COGS. When no economics input is given, margins are
- * zero and `source` is "missing".
+ * Needs per-ASIN cost inputs (price/COGS/fees) supplied by the caller, who reads
+ * them from the client DB (`amzreport_FBA_FEE_PREVIEW` and the `UNIT_COGS`
+ * attribute of `brand_config_amazon_attributes`); the tool does not read them.
+ * When no economics input is given, margins are zero and `source` is "missing".
  */
 
 import { Effect, Schema } from "effect";

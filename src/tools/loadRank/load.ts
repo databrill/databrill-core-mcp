@@ -15,14 +15,14 @@
  * `amazon_browse_node` where that table exists; any other key is a top-level
  * department, which that table does not name, so its key is its `categoryName`.
  */
-
+import { type ProductSelection, resolveProductsForStores } from "../../productSelection.ts";
 import { Effect, Result } from "effect";
 import { tryPromiseOrOperationError } from "../../effectErrors.ts";
 import postgres from "postgres";
 import { createCanonicalQueryBuilder } from "@jsr/databrill__core-pg-kysely/canonical";
 import { marketplaceIdToMarketplaceInfo } from "../../amazonConstants.ts";
 import { runCompiled } from "../../runCompiled.ts";
-import { resolveProducts, resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
+import { resolveStores, resolveWhen } from "../loadAds/loadAds.ts";
 import type { LoadRankParams, LoadRankResult, RankCategoryKind, RankPoint } from "./types.ts";
 
 function fail(msg: string): Result.Result<never, Error> {
@@ -45,10 +45,10 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 		const marketplaceIdByCountry = new Map(stores.map((s) => [s.countryCode, s.marketplaceId]));
 		const range = yield* resolveWhen(params.when, sql);
 
-		let asins: string[] | null = null;
+		let asins: ProductSelection | null = null;
 		if (params.products) {
-			asins = yield* resolveProducts(params.products, sql);
-			if (asins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
+			asins = yield* resolveProductsForStores(params.products, sql, stores);
+			if (asins.size === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 
 		// Which per-marketplace rank tables actually exist?
@@ -100,7 +100,8 @@ export function loadRank(params: LoadRankParams, sql: postgres.Sql): Effect.Effe
 			// which would not match. The range predicate stays on the raw "time" column so
 			// its index and partition pruning apply: local midnight of the first day up to
 			// local midnight after the last, as UTC instants.
-			const asinFilter = asins ? sql`AND asin IN ${sql(asins)}` : sql``;
+			const selectedAsins = asins?.get(marketplaceId);
+			const asinFilter = asins === null ? sql`` : sql`AND asin = ANY(${[...(selectedAsins ?? [])]}::text[])`;
 			const rows = yield* tryPromiseOrOperationError(() =>
 				sql<Array<{ asin: string; category: string; rank: number; date: string; observedAt: string }>>`
 			SELECT DISTINCT ON (asin, category, day)

@@ -12,6 +12,7 @@
  * No read goes back through all of history. Every read is bounded by the rows in the requested range plus
  * one probe per FNSKU or ledger key that has rows in it.
  */
+import { resolveProductsForStores } from "../../productSelection.ts";
 import { createCanonicalQueryBuilder, probeRelations } from "@jsr/databrill__core-pg-kysely/canonical";
 import { Effect, Result } from "effect";
 import { sql as ksql } from "kysely";
@@ -24,7 +25,6 @@ import {
 	type DateRange,
 	parseWhenRange,
 	type ResolvedStore,
-	resolveProducts,
 	resolveStores,
 	resolveTrailingRange,
 } from "../loadAds/loadAds.ts";
@@ -372,29 +372,29 @@ export function loadAmazonFbaStockouts(
 		// Products: each token is an FNSKU candidate; seller SKUs and ASINs map through amzfact_sku_identity (I1).
 		let scopedFnskus: ReadonlyMap<string, readonly string[]> | null = null;
 		if (tokens.length > 0) {
-			const asins = yield* resolveProducts(tokens.join(","), sql, { warnOnMissingFamily: false });
-			const identityRows = yield* runCompiled(
-				sql,
-				() =>
-					ksql<{ readonly merchantId: string; readonly fnsku: string }>`
-SELECT DISTINCT i."merchantId", i."fnsku"
-FROM "amzfact_sku_identity" AS i
-WHERE i."merchantId" = ANY(${ksql.val(merchantIds)}::text[])
-  AND i."fnsku" IS NOT NULL
-  AND (i."sku" = ANY(${ksql.val([...tokens])}::text[]) OR i."asin" = ANY(${ksql.val(asins)}::text[]))
-`.compile(db),
-			);
-			const byMerchant = new Map<string, Set<string>>();
-			for (const merchantId of merchantIds) {
-				byMerchant.set(merchantId, new Set(tokens));
+			const selection = yield* resolveProductsForStores(tokens.join(","), sql, resolvedStores, {
+				warnOnMissingFamily: false,
+			});
+			const byStore = new Map<string, readonly string[]>();
+			for (const store of resolvedStores) {
+				const asins = selection.get(store.marketplaceId) ?? [];
+				const identityRows = yield* runCompiled(sql, () =>
+					ksql<{ readonly fnsku: string }>`
+SELECT DISTINCT i."fnsku" FROM "amzfact_sku_identity" AS i
+WHERE i."merchantId" = ${store.merchantId} AND i."fnsku" IS NOT NULL
+ AND (i."sku" = ANY(${ksql.val([...tokens])}::text[]) OR i."asin" = ANY(${ksql.val([...asins])}::text[]))
+`.compile(db));
+				byStore.set(
+					makeCompositeKey(store.merchantId, store.marketplaceId),
+					[...new Set([...tokens, ...identityRows.map((row) => row.fnsku)])].sort(),
+				);
 			}
-			for (const row of identityRows) {
-				byMerchant.get(row.merchantId)?.add(row.fnsku);
-			}
-			scopedFnskus = new Map([...byMerchant].map(([merchantId, fnskus]) => [merchantId, [...fnskus].sort()]));
+			scopedFnskus = byStore;
 		}
-		function fnskusOf(merchantId: string): readonly string[] | null {
-			return scopedFnskus === null ? null : (scopedFnskus.get(merchantId) ?? []);
+		function fnskusOf(store: ResolvedStore): readonly string[] | null {
+			return scopedFnskus === null
+				? null
+				: (scopedFnskus.get(makeCompositeKey(store.merchantId, store.marketplaceId)) ?? []);
 		}
 
 		// S1: per store, history before the range, its first history day in range, and any FNSKU in _latest.
@@ -445,7 +445,7 @@ SELECT
 			}
 		>();
 		for (const state of storeStates) {
-			const fnskus = fnskusOf(state.store.merchantId);
+			const fnskus = fnskusOf(state.store);
 			if (!state.historyStartsBeforeDateFirst && state.historyStartsAt === null) {
 				continue;
 			}
@@ -473,7 +473,13 @@ SELECT
 		const ledgerMetaByStore = new Map<string, AmazonFbaLedgerStoreMeta>();
 		const centersWithoutCountry = new Set<string>();
 		for (const merchantId of merchantIds) {
-			const fnskus = fnskusOf(merchantId);
+			const fnskus = scopedFnskus === null ? null : [
+				...new Set(
+					resolvedStores.filter((store) => store.merchantId === merchantId).flatMap((store) =>
+						fnskusOf(store) ?? []
+					),
+				),
+			];
 			const ledgerStores: AmazonFbaLedgerStoreRange[] = [];
 			for (const state of storeStates) {
 				if (state.store.merchantId !== merchantId || state.ledgerDateLast === null) {
@@ -511,7 +517,10 @@ SELECT
 		const episodes: AmazonFbaStockoutEpisode[] = [];
 		for (const state of storeStates) {
 			const storeKey = makeCompositeKey(state.store.merchantId, state.store.marketplaceId);
-			const ledgerDraftsAll = ledgerDraftsByStore.get(storeKey) ?? [];
+			const selectedFnskus = fnskusOf(state.store);
+			const ledgerDraftsAll = (ledgerDraftsByStore.get(storeKey) ?? []).filter((draft) =>
+				selectedFnskus === null || selectedFnskus.includes(draft.fnsku)
+			);
 			// M1: a ledger episode belongs to the store when _latest lists the FNSKU for it, or lists none.
 			let ledgerDrafts = ledgerDraftsAll;
 			if (ledgerDraftsAll.length > 0 && state.hasInventoryLatest) {

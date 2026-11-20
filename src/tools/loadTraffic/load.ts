@@ -1,12 +1,12 @@
 /**
  * loadTraffic — per-ASIN (or family) Sales & Traffic metrics over a window.
  *
- * Store and product inputs continue to use loadAds's established resolution
- * helpers. Metric queries are compiled by the canonical
+ * Store inputs use the shared store resolver; product inputs retain their
+ * marketplace when expanding parent ASINs. Metric queries are compiled by the canonical
  * `AmazonReport_SALES_AND_TRAFFIC` reader, once per marketplace so its ASIN and
  * FAMILY levels do not merge marketplace rows that this public result retains.
  */
-
+import { type ProductSelection, resolveProductsForStores } from "../../productSelection.ts";
 import {
 	type AmazonReportSalesAndTrafficResult,
 	type AmazonReportSalesAndTrafficRow,
@@ -22,7 +22,6 @@ import {
 	type DateRange,
 	parseWhenRange,
 	type ResolvedStore,
-	resolveProducts,
 	resolveStores,
 	resolveTrailingRange,
 } from "../loadAds/loadAds.ts";
@@ -164,10 +163,10 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 		const marketplaceGroups = groupStoresByMarketplace(stores);
 		const when = yield* Effect.fromResult(parseWhenRange(params.when));
 
-		let productAsins: string[] | null = null;
+		let productAsins: ProductSelection | null = null;
 		if (params.products) {
-			productAsins = yield* resolveProducts(params.products, sql);
-			if (productAsins.length === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
+			productAsins = yield* resolveProductsForStores(params.products, sql, stores);
+			if (productAsins.size === 0) return yield* Effect.fromResult(fail("products resolved to zero ASINs"));
 		}
 
 		const db = createCanonicalQueryBuilder();
@@ -182,7 +181,7 @@ export function loadTraffic(params: LoadTrafficParams, sql: postgres.Sql): Effec
 				timeGranularity: timeUnit,
 				window,
 				stores: group.stores,
-				asins: productAsins ?? undefined,
+				asins: productAsins === null ? undefined : [...(productAsins.get(group.marketplaceId) ?? [])],
 				measures,
 			});
 		}

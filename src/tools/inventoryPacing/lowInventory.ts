@@ -24,7 +24,7 @@
  * amzspapi_catalog_items_v20220401__catalogitem, amzspapi_fbaInventory_v1__InventorySummary,
  * amzreport_MERCHANT_LISTINGS_ALL, brand_config_amazon_asin/_family.
  */
-
+import { catalogRows as catalogSelection } from "../../catalogRows.ts";
 import { Effect } from "effect";
 import { isMissingRelationOrColumn } from "../../effectErrors.ts";
 import type postgres from "postgres";
@@ -240,8 +240,9 @@ export function loadLowInventory(
 					sql,
 					() =>
 						db
-							.selectFrom("amzspapi_catalog_items_v20220401__catalogitem")
+							.selectFrom(catalogSelection().as("catalog"))
 							.select(["asin", "parent_asin as parentAsin"])
+							.where("country", "=", site)
 							.where((eb) => eb("asin", "=", eb.fn.any(ksql.val(topAsins))))
 							.compile(),
 				);

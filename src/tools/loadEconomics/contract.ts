@@ -30,7 +30,7 @@ const inputSchema = {
 		economics: {
 			type: "object",
 			description:
-				"Optional cost inputs, which the client DB does not hold: { perAsin: { [asin]: { price, cogs, " +
+				"Optional cost inputs, which the tool does not read itself: { perAsin: { [asin]: { price, cogs, " +
 				"fbaPickPack, referralPct, storage } }, familyDefault? }. Money values are per unit, in the currency " +
 				"of the ad revenue. referralPct is a fraction (0.15 means 15%) and defaults to 0.15. familyDefault, " +
 				"when given, applies to every advertised ASIN without a perAsin entry (source=default). An ASIN with " +
@@ -66,7 +66,12 @@ export const loadEconomicsTool = {
 		"(revenue / spend). " +
 		"`economics` applies the cost inputs passed in `economics`: net before ads, net margin, ad cost per sale, " +
 		"and net profit per ad sale without and with halo, where halo sales are valued at the ASIN's own net " +
-		"margin. The client DB holds no price, COGS or fee data, so without `economics` every figure in the " +
+		"margin. The tool reads no cost inputs itself; pass them in `economics`. The client DB holds them: the " +
+		"price and Amazon's fee estimates per SKU and ASIN in amzreport_FBA_FEE_PREVIEW (your_price, " +
+		"estimated_referral_fee_per_unit, expected_fulfillment_fee_per_unit) and the configured unit cost as the " +
+		"UNIT_COGS attribute in brand_config_amazon_attributes. Pass referralPct as " +
+		"estimated_referral_fee_per_unit / the price passed. In a VAT marketplace (UK, EU) your_price includes VAT, " +
+		"which the tool does not take out, so pass the price net of VAT. Without `economics` every figure in the " +
 		"`economics` array is zero with source=missing, ad cost per sale included; compute that one as " +
 		"totalSpend / totalDirectOrders from `rollup`.",
 	inputSchema,
